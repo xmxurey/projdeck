@@ -38,5 +38,8 @@ Remote hosts need only `python3` and `git` (the agent is piped over ssh).
 | `proj restore [host]` | put a batch back |
 | `proj trash [--purge --older 30d]` | list / permanently delete old batches |
 
+`proj clean` works on repository roots only (not subdirectories or plain folders).
+On macOS, iTerm2 asks for Automation permission the first time proj opens a tab.
+
 Tip: set `"cleanupPeriodDays": 365` in Claude Code settings, otherwise transcripts older
 than 30 days are deleted and can't be listed.
