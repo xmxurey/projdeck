@@ -54,6 +54,80 @@ def test_run_fzf_parses_output(monkeypatch):
     R.returncode = 130
     with pytest.raises(ui.Cancelled):
         ui.run_fzf(["x"], [])
+    R.returncode = 1
+    with pytest.raises(ui.Cancelled):
+        ui.run_fzf(["x"], [])
+
+
+def test_run_fzf_other_exit_code_is_error(monkeypatch):
+    class R:
+        returncode = 2
+        stdout = ""
+    monkeypatch.setattr(ui.subprocess, "run", lambda *a, **k: R())
+    with pytest.raises(SystemExit, match="fzf failed \\(exit 2\\)"):
+        ui.run_fzf(["x"], [])
+
+
+def test_run_fzf_uses_utf8_text_mode(monkeypatch):
+    seen = {}
+
+    class R:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(*a, **k):
+        seen.update(k)
+        return R()
+    monkeypatch.setattr(ui.subprocess, "run", fake_run)
+    ui.run_fzf(["x"], [])
+    assert seen.get("encoding") == "utf-8"
+    assert "universal_newlines" not in seen
+
+
+def test_pick_files_preselects_on_load(monkeypatch):
+    captured = {}
+
+    def fake_fzf(lines, args, expect=()):
+        captured["args"] = args
+        return "", []
+    monkeypatch.setattr(ui, "run_fzf", fake_fzf)
+    files = [{"path": "a.log", "suspicious": True, "size": 1},
+             {"path": "b.log", "suspicious": True, "size": 1},
+             {"path": "c.txt", "suspicious": False, "size": 1}]
+    ui.pick_files(files)
+    assert "--bind=load:toggle+down+toggle+down+first" in captured["args"]
+    assert not any(a.startswith("--bind=start:") for a in captured["args"])
+
+
+def test_cli_clean_eof_at_prompt_is_no(tmp_path, monkeypatch, capsys, make_repo):
+    p1 = setup_env(tmp_path, monkeypatch, make_repo)
+    monkeypatch.setattr(ui, "pick_files", lambda files: [f["path"] for f in files if f["suspicious"]])
+
+    def eof(prompt=""):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", eof)
+    assert cli.main(["clean", "local:" + p1]) == 0
+    assert os.path.exists(os.path.join(p1, "debug.log"))
+
+
+def test_cli_sessions_none_skips_fzf(tmp_path, monkeypatch, capsys, make_repo):
+    setup_env(tmp_path, monkeypatch, make_repo)
+
+    def no_fzf(*a, **k):
+        raise AssertionError("fzf must not run without sessions")
+    monkeypatch.setattr(ui, "run_fzf", no_fzf)
+    assert cli.main(["sessions"]) == 0
+    assert "no sessions found" in capsys.readouterr().out
+
+
+def test_env_setup_dedupes_repo_root(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/some/other")
+    cli._env_setup()
+    cli._env_setup()
+    parts = os.environ["PYTHONPATH"].split(os.pathsep)
+    assert parts.count(cli.REPO_ROOT) == 1
+    assert parts[0] == cli.REPO_ROOT
+    assert "/some/other" in parts
 
 
 def setup_env(tmp_path, monkeypatch, make_repo):

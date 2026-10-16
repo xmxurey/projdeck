@@ -12,8 +12,20 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _env_setup():
     # children (fzf preview, background sync) run `python -m projdeck`
-    parts = [REPO_ROOT] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    rest = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if rest and rest[0] == REPO_ROOT:
+        return
+    parts = [REPO_ROOT] + [p for p in rest if p != REPO_ROOT]
     os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+
+
+def _ask(prompt):
+    """input() that treats EOF / Ctrl-C as an empty (i.e. "no") answer."""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
 
 
 def print_sync(status):
@@ -99,8 +111,12 @@ def cmd_browse(cfg, args):
 def cmd_sessions(cfg, args):
     now = time.time()
     rows = model.rows(fresh_caches(cfg, now), cfg, now)
+    pairs = model.all_sessions(rows)
+    if not pairs:
+        print("no sessions found")
+        return 0
     try:
-        host, path, sid = ui.pick_session(model.all_sessions(rows), now)
+        host, path, sid = ui.pick_session(pairs, now)
     except ui.Cancelled:
         return 0
     r = model.find_row(rows, host, path)
@@ -140,7 +156,7 @@ def clean(cfg, host_name, path):
     if not chosen:
         return 0
     print("\n".join("  " + c for c in chosen))
-    if input("move %d file(s) to %s on %s? [y/N] " % (len(chosen), cfg["trash_dir"], host_name)) \
+    if _ask("move %d file(s) to %s on %s? [y/N] " % (len(chosen), cfg["trash_dir"], host_name)) \
             .strip().lower() != "y":
         return 0
     res = sync.run_agent(host, {"action": "trash", "path": path, "files": chosen,
@@ -217,7 +233,7 @@ def cmd_trash(cfg, args):
     for h, b in old:
         print(_batch_line(h, b))
     print("%d batch(es) will be permanently deleted." % len(old))
-    if input("type yes to confirm: ").strip() != "yes":
+    if _ask("type yes to confirm: ").strip() != "yes":
         return 0
     for h in {h["name"]: h for h, _ in old}.values():
         res = sync.run_agent(h, {"action": "purge", "older_days": _days(args.older),

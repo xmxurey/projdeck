@@ -22,11 +22,13 @@ def run_fzf(lines, args, expect=()):
         argv.append("--expect=" + ",".join(expect))
     try:
         r = subprocess.run(argv, input="\n".join(lines), stdout=subprocess.PIPE,
-                           universal_newlines=True)
+                           encoding="utf-8")
     except FileNotFoundError:
         raise SystemExit("fzf is required: brew install fzf")
-    if r.returncode != 0:
+    if r.returncode in (1, 130):  # 1: no match, 130: aborted (Esc / Ctrl-C)
         raise Cancelled()
+    if r.returncode != 0:
+        raise SystemExit("fzf failed (exit %d); fzf >= 0.36 is required" % r.returncode)
     out = r.stdout.split("\n")
     key = out.pop(0) if expect else ""
     return key, [line for line in out if line]
@@ -131,7 +133,8 @@ def pick_files(files):
     args = ["--multi", "--layout=reverse", "--delimiter=\t", "--with-nth=2..",
             "--header=Tab: toggle · Enter: confirm (⚑ = matches junk rules, preselected)"]
     if k:
-        args.append("--bind=start:" + "+".join(["toggle+down"] * k) + "+first")
+        # `load` fires once piped input is read; `start` can fire before items exist.
+        args.append("--bind=load:" + "+".join(["toggle+down"] * k) + "+first")
     _, sel = run_fzf([file_line(f) for f in files], args)
     return [line.split(SEP, 1)[0] for line in sel]
 
