@@ -165,7 +165,32 @@ def test_cli_clean_restore_purge(tmp_path, monkeypatch, capsys, make_repo):
     assert os.path.exists(os.path.join(p1, "debug.log"))
     answers = iter(["y", "no"])
     assert cli.main(["clean", "local:" + p1]) == 0
-    assert cli.main(["trash", "--purge", "--older", "0d"]) == 0  # answered "no"
+    real = cli.time.time()
+    with monkeypatch.context() as m:
+        m.setattr(cli.time, "time", lambda: real + 40 * 86400)
+        assert cli.main(["trash", "--purge", "--older", "30d"]) == 0  # answered "no"
     assert "1 batch" in capsys.readouterr().out
     assert cli.main(["trash"]) == 0
     assert "p1" in capsys.readouterr().out
+
+
+def test_cli_purge_yes_deletes_shown_batch(tmp_path, monkeypatch, capsys, make_repo):
+    p1 = setup_env(tmp_path, monkeypatch, make_repo)
+    monkeypatch.setattr(ui, "pick_files", lambda files: [f["path"] for f in files if f["suspicious"]])
+    answers = iter(["y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert cli.main(["clean", "local:" + p1]) == 0
+    real = cli.time.time()
+    with monkeypatch.context() as m:
+        m.setattr(cli.time, "time", lambda: real + 40 * 86400)
+        m.setattr("builtins.input", lambda prompt="": "yes")
+        assert cli.main(["trash", "--purge", "--older", "30d"]) == 0
+    assert "purged 1" in capsys.readouterr().out
+    assert cli.main(["trash"]) == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
+@pytest.mark.parametrize("v", ["0d", "-3d", "0"])
+def test_cli_purge_rejects_non_positive_older(v):
+    with pytest.raises(SystemExit, match="--older must be > 0"):
+        cli._days(v)

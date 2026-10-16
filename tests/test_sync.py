@@ -208,3 +208,22 @@ def test_payload_with_quote_and_non_ascii_round_trips(tmp_path, make_repo, fake_
     assert st["ok"] is True, st
     vm = sync.read_cache("vm")
     assert [os.path.basename(p["path"]) for p in vm["projects"]] == ["proj"]
+
+
+def test_first_failed_sync_writes_stub_cache(tmp_path, fake_ssh):
+    from projdeck import report
+    cfg = config.load_config(write_cfg(tmp_path, {"hosts": [
+        {"name": "vm", "ssh": "unreachable", "roots": [str(tmp_path)]}]}))
+    assert sync.oldest_sync(cfg) is None
+    sync.sync_host(cfg["hosts"][0], cfg, now=500)
+    c = sync.read_cache("vm")
+    assert c["projects"] == [] and c["synced_at"] == 0 and c["stale_since"] == 500
+    assert "connect failed" in c["last_error"] and c["schema"] == 1
+    assert sync.oldest_sync(cfg) == 0
+    out = report.render([], sync.load_caches(cfg), 1000)
+    assert "vm" in out and "last sync failed" in out
+
+
+def test_load_config_rejects_dash_ssh_alias(tmp_path):
+    with pytest.raises(ValueError):
+        config.load_config(write_cfg(tmp_path, {"hosts": [{"name": "x", "ssh": "-oProxyCommand=x"}]}))

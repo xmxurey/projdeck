@@ -90,6 +90,10 @@ def sync_host(host, cfg, now=None):
                 old["stale_since"] = old.get("stale_since") or old.get("synced_at") or now
                 old["last_error"] = str(e)
                 _write_cache(host["name"], old)
+            else:  # never synced: stub, so one failed attempt does not block every launch
+                _write_cache(host["name"], {
+                    "schema": agent.SCHEMA, "host": host["name"], "collected_at": 0,
+                    "projects": [], "synced_at": 0, "stale_since": now, "last_error": str(e)})
         except OSError:
             pass  # marking stale is best effort; the sync result is still reported
         return {"host": host["name"], "ok": False, "error": str(e)}

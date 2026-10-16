@@ -58,7 +58,11 @@ def open_command(cmd, title, run=subprocess.run, iterm=None):
     if iterm is None:
         iterm = has_iterm()
     if iterm:
-        run(["osascript", "-e", applescript(cmd, title)], check=True)
-        return "iterm"
+        try:
+            run(["osascript", "-e", applescript(cmd, title)], check=True)
+            return "iterm"
+        except subprocess.CalledProcessError:
+            print("iTerm2 automation failed (allow it in System Settings \u203a Privacy & "
+                  "Security \u203a Automation); running here instead", file=sys.stderr)
     run(cmd, shell=True)  # no iTerm2: run in the current terminal
     return "inline"

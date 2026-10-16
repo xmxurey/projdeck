@@ -62,4 +62,4 @@ def human_age(seconds):
                     ("m", 60)):
         if s >= n:
             return "%d%s" % (s // n, unit)
-    return "now"
+    return "<1m"

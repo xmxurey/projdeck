@@ -51,7 +51,7 @@ def test_sessions_helpers():
 
 
 def test_human_age():
-    assert model.human_age(30) == "now"
+    assert model.human_age(30) == "<1m"
     assert model.human_age(5 * 60) == "5m"
     assert model.human_age(3 * 3600) == "3h"
     assert model.human_age(3 * DAY) == "3d"

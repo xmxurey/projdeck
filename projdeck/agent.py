@@ -25,6 +25,8 @@ TEST_DIRS = {"tests", "test"}
 MAX_FILES = 5000
 GIT_TIMEOUT = 5
 TRASH_DIR = "~/.proj-trash"
+HOME_SKIP = {"Library", "Applications", "Movies", "Music", "Pictures", "Public",
+             "Desktop", "Documents", "Downloads"}
 
 
 def git(path, *args):
@@ -135,18 +137,29 @@ def _subdirs(d):
     return out
 
 
+def _repo_root_or_raise(path):
+    try:
+        top = git(path, "rev-parse", "--show-toplevel").strip()
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        raise ValueError("not a git repository: %s" % path)
+    if os.path.realpath(path) != os.path.realpath(top):
+        raise ValueError("clean works on a repository root; %s is inside %s" % (path, top))
+
+
 def discover(roots, depth, include_plain=True):
     """Git repos under roots (not descending into repos) plus, optionally,
     non-git direct children of a root that contain no repo."""
     found = []
 
-    def walk(d, level):
+    def walk(d, level, skip=()):
         if is_repo(d):
             found.append(d)
             return True
         hit = False
         if level < depth:
             for sub in _subdirs(d):
+                if os.path.basename(sub) in skip:
+                    continue
                 hit = walk(sub, level + 1) or hit
         if level == 1 and not hit and include_plain:
             found.append(d)
@@ -154,8 +167,13 @@ def discover(roots, depth, include_plain=True):
 
     for r in roots:
         r = os.path.abspath(os.path.expanduser(r))
-        if os.path.isdir(r):
-            walk(r, 0)
+        if not os.path.isdir(r):
+            continue
+        if os.path.realpath(r) == os.path.realpath(os.path.expanduser("~")):
+            skip = HOME_SKIP
+        else:
+            skip = ()
+        walk(r, 0, skip)
     return sorted(set(found))
 
 
@@ -232,7 +250,11 @@ def scan_sessions(claude_dir):
         pd = os.path.join(base, d)
         if not os.path.isdir(pd):
             continue
-        for fn in sorted(os.listdir(pd)):
+        try:
+            fns = sorted(os.listdir(pd))
+        except OSError:
+            continue
+        for fn in fns:
             if not fn.endswith(".jsonl"):
                 continue
             try:
@@ -291,9 +313,12 @@ def collect(req):
     paths = discover(req.get("roots") or ["~"], int(req.get("scan_depth", 2)),
                      bool(req.get("include_plain", True)))
     sessions = scan_sessions(req.get("claude_dir") or "~/.claude")
+    discovered = list(paths)
     for s in sessions:
-        if owner(s["cwd"], paths) is None:
-            paths.append(project_root_for(s["cwd"]))  # known only through its sessions
+        if owner(s["cwd"], discovered) is None:
+            root = project_root_for(s["cwd"])  # known only through its sessions
+            if root not in paths:
+                paths.append(root)
     projects = {path: build_project(path, patterns) for path in paths}
     for s in sessions:
         projects[owner(s["cwd"], list(projects))]["sessions"].append(s)
@@ -318,6 +343,7 @@ def _write_manifest(batch_dir, manifest):
 
 def act_list(req):
     path = os.path.abspath(os.path.expanduser(req["path"]))
+    _repo_root_or_raise(path)
     patterns = req.get("patterns") or DEFAULT_PATTERNS
     _, untracked = git_info(path)
     files = []
@@ -332,6 +358,7 @@ def act_list(req):
 
 def act_trash(req):
     path = os.path.abspath(os.path.expanduser(req["path"]))
+    _repo_root_or_raise(path)
     now = req.get("now") or time.time()
     current = set(git_info(path)[1])  # re-check: only still-untracked, non-ignored files
     root = _trash_root(req)
@@ -367,8 +394,11 @@ def _load_batches(root):
                 m = json.load(f)
         except (OSError, ValueError):
             continue
-        out.append({"id": name, "created": m["created"], "project": m["project"],
-                    "count": len(m["items"])})
+        try:
+            out.append({"id": name, "created": m["created"], "project": m["project"],
+                        "count": len(m["items"])})
+        except (KeyError, TypeError):
+            continue  # unreadable manifest: skip this batch only
     return out
 
 
@@ -392,10 +422,14 @@ def _discard_batch(batch_dir):
         pass
 
 
+def _check_batch_id(batch_id):
+    if not isinstance(batch_id, str) or "/" in batch_id or batch_id in ("", ".", ".."):
+        raise ValueError("bad batch id %r" % (batch_id,))
+
+
 def act_restore(req):
     batch_id = req["batch"]
-    if "/" in batch_id or batch_id in ("", ".", ".."):
-        raise ValueError("bad batch id %r" % batch_id)
+    _check_batch_id(batch_id)
     batch_dir = os.path.join(_trash_root(req), batch_id)
     with open(os.path.join(batch_dir, "manifest.json")) as f:
         manifest = json.load(f)
@@ -424,10 +458,21 @@ def act_restore(req):
 
 def act_purge(req):
     root = _trash_root(req)
-    cutoff = (req.get("now") or time.time()) - float(req["older_days"]) * 86400
+    ids = req.get("ids")
+    if ids is not None:
+        for i in ids:
+            _check_batch_id(i)
+        wanted = set(ids)
+        cutoff = None
+    else:
+        days = float(req["older_days"])
+        if days < 0:
+            raise ValueError("older_days must be >= 0")
+        wanted = None
+        cutoff = (req.get("now") or time.time()) - days * 86400
     purged = []
     for b in _load_batches(root):
-        if b["created"] < cutoff:
+        if (b["id"] in wanted) if wanted is not None else (b["created"] < cutoff):
             shutil.rmtree(os.path.join(root, b["id"]))
             purged.append(b["id"])
     return {"purged": purged}

@@ -111,3 +111,61 @@ def test_restore_partial_failure_updates_manifest(repo, tmp_path, monkeypatch):
     assert [(b["id"], b["count"]) for b in batches] == [(res["batch"], 1)]
     assert os.path.exists(os.path.join(repo, "debug.log"))
     assert not os.path.exists(os.path.join(repo, "notes", "idea.txt"))
+
+
+def test_list_and_trash_refuse_subdirectory_of_repo(tmp_path, make_repo):
+    g = make_repo(tmp_path / "g", {"sub/sub/new.log": "tracked"})
+    write(os.path.join(g, "sub", "new.log"), "untracked")
+    trash = str(tmp_path / "trash")
+    with pytest.raises(ValueError, match="repository root"):
+        agent.ACTIONS["list"]({"path": os.path.join(g, "sub")})
+    with pytest.raises(ValueError, match="repository root"):
+        agent.ACTIONS["trash"]({"path": os.path.join(g, "sub"), "files": ["sub/new.log"],
+                                "trash_dir": trash})
+    assert os.path.exists(os.path.join(g, "sub", "sub", "new.log"))
+    assert os.path.exists(os.path.join(g, "sub", "new.log"))
+    assert not os.path.exists(trash)
+
+
+def test_list_and_trash_refuse_non_repo(tmp_path):
+    d = tmp_path / "plain"
+    d.mkdir()
+    for act in ("list", "trash"):
+        with pytest.raises(ValueError, match="not a git repository"):
+            agent.ACTIONS[act]({"path": str(d), "files": [], "trash_dir": str(tmp_path / "t")})
+
+
+def _make_batch(trash, name, created, project="/p"):
+    os.makedirs(os.path.join(trash, name))
+    with open(os.path.join(trash, name, "manifest.json"), "w") as f:
+        f.write('{"created": %d, "project": "%s", "items": []}' % (created, project))
+
+
+def test_purge_with_ids_deletes_only_listed(tmp_path):
+    trash = str(tmp_path / "trash")
+    _make_batch(trash, "a", 1)
+    _make_batch(trash, "b", 1)
+    res = agent.ACTIONS["purge"]({"trash_dir": trash, "ids": ["a", "nope"], "older_days": 0})
+    assert res["purged"] == ["a"]
+    assert os.listdir(trash) == ["b"]
+    for bad in ("", ".", "..", "x/y"):
+        with pytest.raises(ValueError):
+            agent.ACTIONS["purge"]({"trash_dir": trash, "ids": [bad]})
+    assert os.listdir(trash) == ["b"]
+
+
+def test_purge_rejects_negative_older_days(tmp_path):
+    with pytest.raises(ValueError):
+        agent.ACTIONS["purge"]({"trash_dir": str(tmp_path), "older_days": -1})
+
+
+def test_load_batches_skips_bad_manifest(tmp_path):
+    trash = str(tmp_path / "trash")
+    _make_batch(trash, "good", 5)
+    os.makedirs(os.path.join(trash, "bad"))
+    with open(os.path.join(trash, "bad", "manifest.json"), "w") as f:
+        f.write('{"created": 1}')
+    os.makedirs(os.path.join(trash, "weird"))
+    with open(os.path.join(trash, "weird", "manifest.json"), "w") as f:
+        f.write("[1]")
+    assert [b["id"] for b in agent.ACTIONS["batches"]({"trash_dir": trash})["batches"]] == ["good"]

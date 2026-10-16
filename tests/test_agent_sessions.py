@@ -80,3 +80,39 @@ def test_main_via_stdin_like_remote(tmp_path):
 def test_main_reports_errors_as_json(capsys):
     assert agent.main(["agent.py", json.dumps({"action": "nope"})]) == 1
     assert "error" in json.loads(capsys.readouterr().out)
+
+
+def test_collect_orphans_not_absorbed_by_earlier_orphan(tmp_path, make_session, monkeypatch):
+    home = tmp_path / "h"
+    home.mkdir()
+    claude = tmp_path / "claude"
+    make_session(claude, str(home), "s1", [user(str(home), "a")])
+    make_session(claude, str(home) + "/gone", "s2", [user(str(home) + "/gone", "b")])
+    out = agent.collect({"roots": [str(tmp_path / "nothing")], "claude_dir": str(claude)})
+    by = {p["path"]: p for p in out["projects"]}
+    assert sorted(by) == [str(home), str(home) + "/gone"]
+    assert by[str(home) + "/gone"]["exists"] is False
+    assert [s["id"] for s in by[str(home) + "/gone"]["sessions"]] == ["s2"]
+
+
+def test_discover_skips_home_folders(tmp_path, make_repo, monkeypatch):
+    home = tmp_path / "home"
+    for d in ("Library", "Documents", "Downloads"):
+        make_repo(home / d / "repo")
+    make_repo(home / "code")
+    monkeypatch.setenv("HOME", str(home))
+    assert agent.discover(["~"], 3, include_plain=True) == [str(home / "code")]
+
+
+def test_scan_sessions_survives_listdir_error(tmp_path, make_session, monkeypatch):
+    claude = tmp_path / "claude"
+    make_session(claude, "/a", "ok", [user("/a", "x")])
+    make_session(claude, "/b", "bad", [user("/b", "x")])
+    real = os.listdir
+
+    def fake(p):
+        if p.endswith("-b"):
+            raise PermissionError(p)
+        return real(p)
+    monkeypatch.setattr(os, "listdir", fake)
+    assert [s["id"] for s in agent.scan_sessions(str(claude))] == ["ok"]

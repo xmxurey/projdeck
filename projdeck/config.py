@@ -52,6 +52,9 @@ def load_config(path=None):
         if name in names:
             raise ValueError("duplicate host name %r" % name)
         names.add(name)
+        if h.get("ssh") is not None and (not isinstance(h["ssh"], str)
+                                         or h["ssh"].startswith("-")):
+            raise ValueError("invalid ssh alias %r for host %r" % (h["ssh"], name))
     return cfg
 
 

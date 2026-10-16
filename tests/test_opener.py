@@ -46,3 +46,15 @@ def test_open_command_paths():
     assert calls[0][0][0][:2] == ["osascript", "-e"]
     assert opener.open_command("ls", "t", run=run, iterm=False) == "inline"
     assert calls[1] == (("ls",), {"shell": True})
+
+
+def test_open_command_falls_back_when_osascript_fails(capsys):
+    calls = []
+
+    def run(*a, **k):
+        calls.append(a)
+        if a[0][0] == "osascript":
+            raise subprocess.CalledProcessError(1, "osascript")
+    assert opener.open_command("ls", "t", run=run, iterm=True) == "inline"
+    assert calls[-1] == ("ls",)
+    assert "iTerm2 automation failed" in capsys.readouterr().err

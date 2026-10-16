@@ -216,7 +216,10 @@ def cmd_restore(cfg, args):
 
 def _days(spec):
     spec = spec.strip().lower()
-    return float(spec[:-1]) if spec.endswith("d") else float(spec)
+    days = float(spec[:-1]) if spec.endswith("d") else float(spec)
+    if days <= 0:
+        raise SystemExit("--older must be > 0")
+    return days
 
 
 def cmd_trash(cfg, args):
@@ -235,10 +238,12 @@ def cmd_trash(cfg, args):
     print("%d batch(es) will be permanently deleted." % len(old))
     if _ask("type yes to confirm: ").strip() != "yes":
         return 0
-    for h in {h["name"]: h for h, _ in old}.values():
-        res = sync.run_agent(h, {"action": "purge", "older_days": _days(args.older),
+    hosts = {h["name"]: h for h, _ in old}
+    for name, h in hosts.items():
+        ids = [b["id"] for h2, b in old if h2["name"] == name]
+        res = sync.run_agent(h, {"action": "purge", "ids": ids,
                                  "trash_dir": cfg["trash_dir"]}, cfg["ssh_timeout"])
-        print("%s: purged %d" % (h["name"], len(res["purged"])))
+        print("%s: purged %d" % (name, len(res["purged"])))
     return 0
 
 
