@@ -305,7 +305,114 @@ def collect(req):
             "projects": sorted(projects.values(), key=lambda p: p["path"])}
 
 
-ACTIONS = {"collect": collect}
+def _trash_root(req):
+    return os.path.expanduser(req.get("trash_dir") or TRASH_DIR)
+
+
+def _write_manifest(batch_dir, manifest):
+    tmp = os.path.join(batch_dir, "manifest.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(manifest, f)
+    os.replace(tmp, os.path.join(batch_dir, "manifest.json"))
+
+
+def act_list(req):
+    path = os.path.abspath(os.path.expanduser(req["path"]))
+    patterns = req.get("patterns") or DEFAULT_PATTERNS
+    _, untracked = git_info(path)
+    files = []
+    for rel in untracked:
+        try:
+            size = os.lstat(os.path.join(path, rel)).st_size
+        except OSError:
+            size = 0
+        files.append({"path": rel, "suspicious": is_suspicious(rel, patterns), "size": size})
+    return {"path": path, "files": files}
+
+
+def act_trash(req):
+    path = os.path.abspath(os.path.expanduser(req["path"]))
+    now = req.get("now") or time.time()
+    current = set(git_info(path)[1])  # re-check: only still-untracked, non-ignored files
+    root = _trash_root(req)
+    base_id = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + os.path.basename(path)
+    batch_id, n = base_id, 1
+    while os.path.exists(os.path.join(root, batch_id)):
+        n += 1
+        batch_id = "%s-%d" % (base_id, n)
+    batch_dir = os.path.join(root, batch_id)
+    manifest = {"created": int(now), "project": path, "items": []}
+    skipped = []
+    for rel in req.get("files", []):
+        src = os.path.normpath(os.path.join(path, rel))
+        if os.path.isabs(rel) or not src.startswith(path + os.sep) or rel not in current:
+            skipped.append(rel)
+            continue
+        dst = os.path.join(batch_dir, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(src, dst)
+        manifest["items"].append({"src": src, "dst": dst})
+        _write_manifest(batch_dir, manifest)  # after every move, so a crash loses nothing
+    moved = [it["src"] for it in manifest["items"]]
+    return {"batch": batch_id if moved else None, "moved": moved, "skipped": skipped}
+
+
+def _load_batches(root):
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for name in sorted(os.listdir(root)):
+        try:
+            with open(os.path.join(root, name, "manifest.json")) as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            continue
+        out.append({"id": name, "created": m["created"], "project": m["project"],
+                    "count": len(m["items"])})
+    return out
+
+
+def act_batches(req):
+    return {"batches": _load_batches(_trash_root(req))}
+
+
+def act_restore(req):
+    batch_id = req["batch"]
+    if "/" in batch_id or batch_id in ("", ".", ".."):
+        raise ValueError("bad batch id %r" % batch_id)
+    batch_dir = os.path.join(_trash_root(req), batch_id)
+    with open(os.path.join(batch_dir, "manifest.json")) as f:
+        manifest = json.load(f)
+    restored, skipped, remaining = [], [], []
+    for it in manifest["items"]:
+        if os.path.lexists(it["src"]) or not os.path.lexists(it["dst"]):
+            skipped.append(it["src"])
+            remaining.append(it)
+            continue
+        os.makedirs(os.path.dirname(it["src"]), exist_ok=True)
+        shutil.move(it["dst"], it["src"])
+        restored.append(it["src"])
+    if remaining:
+        manifest["items"] = remaining
+        _write_manifest(batch_dir, manifest)
+    else:
+        shutil.rmtree(batch_dir)
+    return {"restored": restored, "skipped": skipped}
+
+
+def act_purge(req):
+    root = _trash_root(req)
+    cutoff = (req.get("now") or time.time()) - float(req["older_days"]) * 86400
+    purged = []
+    for b in _load_batches(root):
+        if b["created"] < cutoff:
+            shutil.rmtree(os.path.join(root, b["id"]))
+            purged.append(b["id"])
+    return {"purged": purged}
+
+
+ACTIONS = {"collect": collect, "list": act_list, "trash": act_trash,
+           "batches": act_batches, "restore": act_restore, "purge": act_purge}
 
 
 def main(argv):
