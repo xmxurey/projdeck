@@ -1,5 +1,7 @@
 """Turn per-host caches into one sorted list of project rows."""
 TIER_ICON = {"active": "●", "stale": "◐", "abandoned": "○", "deleted": "✗"}
+ROW_DEFAULTS = {"exists": True, "git": None, "last_mtime": 0, "suspicious": [], "progress": "",
+                "sessions": [], "errors": []}
 
 
 def last_activity(p):
@@ -26,13 +28,19 @@ def rows(caches, cfg, now):
     for c in caches:
         h = hosts.get(c["host"], {"ssh": c["host"]})
         for p in c["projects"]:
-            r = dict(p)
+            r = dict(ROW_DEFAULTS)
+            r.update(p)
             r.update(host=c["host"], local=bool(h.get("local")), ssh=h.get("ssh"),
                      activity=last_activity(p), tier=tier(p, now, cfg["tiers_days"]),
                      stale_since=c.get("stale_since"))
             out.append(r)
     out.sort(key=lambda r: -r["activity"])
     return out
+
+
+def n_suspicious(r):
+    """Total suspicious files; the list itself is capped by the agent."""
+    return r.get("suspicious_count", len(r.get("suspicious") or []))
 
 
 def find_row(rows_, host, path):

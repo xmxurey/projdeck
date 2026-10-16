@@ -116,3 +116,12 @@ def test_scan_sessions_survives_listdir_error(tmp_path, make_session, monkeypatc
         return real(p)
     monkeypatch.setattr(os, "listdir", fake)
     assert [s["id"] for s in agent.scan_sessions(str(claude))] == ["ok"]
+
+
+def test_suspicious_list_is_capped_but_counted(tmp_path, make_repo, monkeypatch):
+    repo = make_repo(tmp_path / "proj", {"a.py": "1"})
+    for i in range(5):
+        write(os.path.join(repo, "r%d.log" % i))
+    monkeypatch.setattr(agent, "SUSPICIOUS_CAP", 3)
+    p = agent.build_project(repo, agent.DEFAULT_PATTERNS)
+    assert len(p["suspicious"]) == 3 and p["suspicious_count"] == 5

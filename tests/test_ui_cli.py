@@ -101,7 +101,7 @@ def test_pick_files_preselects_on_load(monkeypatch):
 
 def test_cli_clean_eof_at_prompt_is_no(tmp_path, monkeypatch, capsys, make_repo):
     p1 = setup_env(tmp_path, monkeypatch, make_repo)
-    monkeypatch.setattr(ui, "pick_files", lambda files: [f["path"] for f in files if f["suspicious"]])
+    monkeypatch.setattr(ui, "pick_files", lambda files, **k: [f["path"] for f in files if f["suspicious"]])
 
     def eof(prompt=""):
         raise EOFError
@@ -154,7 +154,7 @@ def test_cli_sync_report_and_preview(tmp_path, monkeypatch, capsys, make_repo):
 
 def test_cli_clean_restore_purge(tmp_path, monkeypatch, capsys, make_repo):
     p1 = setup_env(tmp_path, monkeypatch, make_repo)
-    monkeypatch.setattr(ui, "pick_files", lambda files: [f["path"] for f in files if f["suspicious"]])
+    monkeypatch.setattr(ui, "pick_files", lambda files, **k: [f["path"] for f in files if f["suspicious"]])
     answers = iter(["y"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     assert cli.main(["clean", "local:" + p1]) == 0
@@ -176,7 +176,7 @@ def test_cli_clean_restore_purge(tmp_path, monkeypatch, capsys, make_repo):
 
 def test_cli_purge_yes_deletes_shown_batch(tmp_path, monkeypatch, capsys, make_repo):
     p1 = setup_env(tmp_path, monkeypatch, make_repo)
-    monkeypatch.setattr(ui, "pick_files", lambda files: [f["path"] for f in files if f["suspicious"]])
+    monkeypatch.setattr(ui, "pick_files", lambda files, **k: [f["path"] for f in files if f["suspicious"]])
     answers = iter(["y"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     assert cli.main(["clean", "local:" + p1]) == 0
@@ -194,3 +194,48 @@ def test_cli_purge_yes_deletes_shown_batch(tmp_path, monkeypatch, capsys, make_r
 def test_cli_purge_rejects_non_positive_older(v):
     with pytest.raises(SystemExit, match="--older must be > 0"):
         cli._days(v)
+
+
+def test_pick_files_passes_preview(monkeypatch):
+    captured = {}
+
+    def fake_fzf(lines, args, expect=()):
+        captured["args"] = args
+        return "", []
+    monkeypatch.setattr(ui, "run_fzf", fake_fzf)
+    ui.pick_files([{"path": "a.log", "suspicious": True, "size": 1}], preview="PREVIEW {1}")
+    assert "--preview=PREVIEW {1}" in captured["args"]
+
+
+def test_file_preview_cmd_quotes_host_and_root():
+    cmd = ui.file_preview_cmd("my host", "/a b/repo")
+    assert cmd.endswith("_fpreview 'my host' '/a b/repo' {1}")
+
+
+def test_cli_fpreview_local_text_dir_and_binary(tmp_path, monkeypatch, capsys, make_repo):
+    p1 = setup_env(tmp_path, monkeypatch, make_repo)
+    os.makedirs(os.path.join(p1, "out"))
+    with open(os.path.join(p1, "out", "x.txt"), "w") as f:
+        f.write("1")
+    with open(os.path.join(p1, "blob.bin"), "wb") as f:
+        f.write(b"\x00\x01" * 10)
+    assert cli.main(["_fpreview", "local", p1, "debug.log\t"]) == 0  # fzf keeps the delimiter
+    assert capsys.readouterr().out.strip() == "x"
+    assert cli.main(["_fpreview", "local", p1, "out/"]) == 0
+    assert "x.txt" in capsys.readouterr().out
+    assert cli.main(["_fpreview", "local", p1, "blob.bin"]) == 0
+    assert "binary" in capsys.readouterr().out
+
+
+def test_fpreview_remote_builds_quoted_ssh(monkeypatch):
+    calls = []
+
+    class R:
+        stdout = b"hello\n"
+        returncode = 0
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **k: calls.append(argv) or R())
+    out = cli.file_preview({"name": "vm", "ssh": "vm"}, "/home/u/a b.log")
+    assert out == "hello\n"
+    assert calls[0][:2] == ["ssh", "-o"] and calls[0][-2] == "vm"
+    assert "'/home/u/a b.log'" in calls[0][-1]
+

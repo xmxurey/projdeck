@@ -1,7 +1,7 @@
 """Markdown overview: what needs attention across all hosts."""
 import time
 
-from projdeck.model import human_age
+from projdeck.model import human_age, n_suspicious
 
 
 def _key(r):
@@ -26,9 +26,9 @@ def render(rows, caches, now):
         "- %s ±%d ↑%d" % (_key(r), r["git"]["dirty"], r["git"]["ahead"])
         for r in git_rows if r["git"]["dirty"] or r["git"]["ahead"]])
     section("No upstream branch", ["- %s" % _key(r) for r in git_rows if r["git"]["no_upstream"]])
-    susp = sorted((r for r in rows if r["suspicious"]), key=lambda r: -len(r["suspicious"]))
+    susp = sorted((r for r in rows if n_suspicious(r)), key=lambda r: -n_suspicious(r))
     section("Suspicious untracked files", [
-        "- %s %d files: %s" % (_key(r), len(r["suspicious"]), ", ".join(r["suspicious"][:5]))
+        "- %s %d files: %s" % (_key(r), n_suspicious(r), ", ".join(r["suspicious"][:5]))
         for r in susp[:15]])
     section("Abandoned", ["- %s %s" % (_key(r), human_age(now - r["activity"]))
                           for r in rows if r["tier"] == "abandoned"])

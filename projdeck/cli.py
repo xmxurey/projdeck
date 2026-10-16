@@ -1,6 +1,7 @@
 """`proj` command line."""
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -150,7 +151,7 @@ def clean(cfg, host_name, path):
         print("no untracked files in %s:%s" % (host_name, path))
         return 0
     try:
-        chosen = ui.pick_files(listing["files"])
+        chosen = ui.pick_files(listing["files"], preview=ui.file_preview_cmd(host_name, listing["path"]))
     except ui.Cancelled:
         return 0
     if not chosen:
@@ -255,6 +256,40 @@ def cmd_preview(cfg, args):
     return 0
 
 
+PREVIEW_BYTES = 8192
+
+
+def _show(data, size_hint=None):
+    if b"\0" in data[:PREVIEW_BYTES]:
+        return "(binary file%s)" % ("" if size_hint is None else ", %d bytes" % size_hint)
+    return data[:PREVIEW_BYTES].decode("utf-8", "replace")
+
+
+def file_preview(host, full):
+    """First few KB of a file (or a directory listing) on `host`, for the clean picker."""
+    if host.get("local"):
+        if os.path.isdir(full):
+            names = sorted(os.listdir(full))
+            return "\n".join(names[:200]) + ("\n…" if len(names) > 200 else "")
+        with open(full, "rb") as f:
+            return _show(f.read(PREVIEW_BYTES), os.fstat(f.fileno()).st_size)
+    p = shlex.quote(full)
+    script = "if [ -d %s ]; then ls -A %s | head -200; else head -c %d %s; fi" % (
+        p, p, PREVIEW_BYTES, p)
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host["ssh"], script],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+    return _show(r.stdout)
+
+
+def cmd_fpreview(cfg, args):
+    try:
+        print(file_preview(config.host_by_name(cfg, args.host),
+                           os.path.join(args.root, args.rel.rstrip("\t"))), end="")
+    except (OSError, subprocess.SubprocessError) as e:
+        print("(cannot preview: %s)" % e)
+    return 0
+
+
 def parser():
     p = argparse.ArgumentParser(prog="proj", description="projects & Claude sessions across hosts")
     sub = p.add_subparsers(dest="cmd")
@@ -274,12 +309,16 @@ def parser():
     s = sub.add_parser("_preview")
     s.add_argument("host")
     s.add_argument("path")
+    s = sub.add_parser("_fpreview")
+    s.add_argument("host")
+    s.add_argument("root")
+    s.add_argument("rel")
     return p
 
 
 COMMANDS = {None: cmd_browse, "sessions": cmd_sessions, "sync": cmd_sync, "report": cmd_report,
             "clean": cmd_clean, "restore": cmd_restore, "trash": cmd_trash,
-            "_preview": cmd_preview}
+            "_preview": cmd_preview, "_fpreview": cmd_fpreview}
 
 
 def main(argv=None):

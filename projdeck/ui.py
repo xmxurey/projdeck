@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from projdeck.model import TIER_ICON, human_age
+from projdeck.model import TIER_ICON, human_age, n_suspicious
 
 SEP = "\t"
 PROJECT_KEYS = ["ctrl-r", "ctrl-s", "ctrl-x", "ctrl-u"]
@@ -38,6 +38,11 @@ def preview_cmd():
     return "%s -m projdeck _preview {1} {2}" % shlex.quote(sys.executable)
 
 
+def file_preview_cmd(host_name, root):
+    return "%s -m projdeck _fpreview %s %s {1}" % (shlex.quote(sys.executable),
+                                                   shlex.quote(host_name), shlex.quote(root))
+
+
 def _name(path):
     return os.path.basename(path.rstrip("/")) or path
 
@@ -51,8 +56,8 @@ def project_line(r, now):
         flags.append("↑%d" % g["ahead"])
     if r.get("git") and g.get("no_upstream"):
         flags.append("⊘")
-    if r["suspicious"]:
-        flags.append("⚑%d" % len(r["suspicious"]))
+    if n_suspicious(r):
+        flags.append("⚑%d" % n_suspicious(r))
     if r["sessions"]:
         flags.append("💬%d" % len(r["sessions"]))
     if not r.get("git") and r["exists"]:
@@ -91,7 +96,7 @@ def preview_text(r, now):
         out.append("directory no longer exists")
     if r["suspicious"]:
         out.append("")
-        out.append("suspicious files (%d):" % len(r["suspicious"]))
+        out.append("suspicious files (%d):" % n_suspicious(r))
         out.extend("  " + s for s in r["suspicious"][:10])
     if r["progress"]:
         out.extend(["", "progress:"] + ["  " + line for line in r["progress"].splitlines()])
@@ -127,11 +132,13 @@ def pick_session(pairs, now):
     return host, path, sid
 
 
-def pick_files(files):
+def pick_files(files, preview=None):
     files = sorted(files, key=lambda f: (not f["suspicious"], f["path"]))
     k = sum(1 for f in files if f["suspicious"])
     args = ["--multi", "--layout=reverse", "--delimiter=\t", "--with-nth=2..",
             "--header=Tab: toggle · Enter: confirm (⚑ = matches junk rules, preselected)"]
+    if preview:
+        args += ["--preview=" + preview, "--preview-window=right,50%,wrap"]
     if k:
         # `load` fires once piped input is read; `start` can fire before items exist.
         args.append("--bind=load:" + "+".join(["toggle+down"] * k) + "+first")

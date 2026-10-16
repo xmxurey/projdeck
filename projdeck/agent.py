@@ -23,6 +23,7 @@ DEFAULT_PATTERNS = ["test_*.py", "*_backup*", "*.bak", "*.log", "*SUMMARY*.md",
                     "tmp*", "scratch*", "*.orig", "*_v2.*", "*_old.*"]
 TEST_DIRS = {"tests", "test"}
 MAX_FILES = 5000
+SUSPICIOUS_CAP = 200
 GIT_TIMEOUT = 5
 TRASH_DIR = "~/.proj-trash"
 HOME_SKIP = {"Library", "Applications", "Movies", "Music", "Pictures", "Public",
@@ -298,7 +299,8 @@ def build_project(path, patterns):
         try:
             info, untracked = git_info(path)
             p["git"] = info
-            p["suspicious"] = [u for u in untracked if is_suspicious(u, patterns)]
+            susp = [u for u in untracked if is_suspicious(u, patterns)]
+            p["suspicious"], p["suspicious_count"] = susp[:SUSPICIOUS_CAP], len(susp)
         except Exception as e:
             p["errors"].append("git: %s" % e)
     try:

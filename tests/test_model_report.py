@@ -73,3 +73,14 @@ def test_report_sections():
     assert "`mac:/dirty` ±3" in md
     assert "`mac:/dirty` 2 files: a.log, b.log" in md
     assert "`mac:/gone`" in md and "`mac:/old` 6mo" in md
+
+
+def test_suspicious_count_prefers_total_and_report_tolerates_missing_keys():
+    p = proj("/many", mtime=NOW, git=True, suspicious=["a.log"])
+    p["suspicious_count"] = 250
+    bare = {"path": "/bare", "exists": True, "last_mtime": NOW, "sessions": []}  # older agent output
+    caches = [{"host": "mac", "synced_at": NOW, "stale_since": None, "projects": [p, bare]}]
+    rows = model.rows(caches, CFG, NOW)
+    assert model.n_suspicious(rows[0]) == 250 and model.n_suspicious({}) == 0
+    md = report.render(rows, caches, NOW)
+    assert "`mac:/many` 250 files: a.log" in md
