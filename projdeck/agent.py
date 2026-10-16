@@ -376,6 +376,22 @@ def act_batches(req):
     return {"batches": _load_batches(_trash_root(req))}
 
 
+def _discard_batch(batch_dir):
+    """Drop the manifest and any directories left empty. Never deletes files: a
+    stray file (not listed in the manifest) keeps its directory and survives."""
+    os.remove(os.path.join(batch_dir, "manifest.json"))
+    for dirpath, _dirnames, _filenames in os.walk(batch_dir, topdown=False):
+        if dirpath != batch_dir:
+            try:
+                os.rmdir(dirpath)
+            except OSError:
+                pass
+    try:
+        os.rmdir(batch_dir)
+    except OSError:
+        pass
+
+
 def act_restore(req):
     batch_id = req["batch"]
     if "/" in batch_id or batch_id in ("", ".", ".."):
@@ -383,20 +399,26 @@ def act_restore(req):
     batch_dir = os.path.join(_trash_root(req), batch_id)
     with open(os.path.join(batch_dir, "manifest.json")) as f:
         manifest = json.load(f)
-    restored, skipped, remaining = [], [], []
-    for it in manifest["items"]:
+    items = manifest["items"]
+    restored, skipped, kept = [], [], []
+    for i, it in enumerate(items):
         if os.path.lexists(it["src"]) or not os.path.lexists(it["dst"]):
             skipped.append(it["src"])
-            remaining.append(it)
+            kept.append(it)
             continue
         os.makedirs(os.path.dirname(it["src"]), exist_ok=True)
         shutil.move(it["dst"], it["src"])
         restored.append(it["src"])
-    if remaining:
-        manifest["items"] = remaining
+        # Manifest tracks progress: drop this item now, so a failure on a later move
+        # leaves only the unrestored items listed.
+        manifest["items"] = kept + items[i + 1:]
+        if manifest["items"]:
+            _write_manifest(batch_dir, manifest)
+    if kept:
+        manifest["items"] = kept
         _write_manifest(batch_dir, manifest)
     else:
-        shutil.rmtree(batch_dir)
+        _discard_batch(batch_dir)
     return {"restored": restored, "skipped": skipped}
 
 

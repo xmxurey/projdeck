@@ -1,4 +1,3 @@
-import json
 import os
 
 import pytest
@@ -76,3 +75,39 @@ def test_purge_only_old_batches(repo, tmp_path):
     out = agent.ACTIONS["purge"]({"older_days": 5, "now": 10 * 86400 + 1, "trash_dir": trash})
     assert out["purged"] == [old["batch"]]
     assert [b["id"] for b in agent.ACTIONS["batches"]({"trash_dir": trash})["batches"]] == [new["batch"]]
+
+
+def test_restore_keeps_unlisted_files_in_batch(repo, tmp_path):
+    trash = str(tmp_path / "trash")
+    res = agent.ACTIONS["trash"]({"path": repo, "files": ["debug.log"], "trash_dir": trash})
+    batch_dir = os.path.join(trash, res["batch"])
+    stray = os.path.join(batch_dir, "stray.txt")
+    write(stray, "not in manifest")
+    back = agent.ACTIONS["restore"]({"batch": res["batch"], "trash_dir": trash})
+    assert back["restored"] == [os.path.join(repo, "debug.log")]
+    assert os.path.exists(os.path.join(repo, "debug.log"))
+    assert os.path.exists(stray)
+    assert not os.path.exists(os.path.join(batch_dir, "manifest.json"))
+
+
+def test_restore_partial_failure_updates_manifest(repo, tmp_path, monkeypatch):
+    trash = str(tmp_path / "trash")
+    res = agent.ACTIONS["trash"]({"path": repo, "files": ["debug.log", "notes/idea.txt"],
+                                  "trash_dir": trash})
+    real_move = agent.shutil.move
+    calls = []
+
+    def flaky_move(src, dst):
+        calls.append(src)
+        if len(calls) == 2:
+            raise OSError("disk went away")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(agent.shutil, "move", flaky_move)
+    with pytest.raises(OSError):
+        agent.ACTIONS["restore"]({"batch": res["batch"], "trash_dir": trash})
+    monkeypatch.undo()
+    batches = agent.ACTIONS["batches"]({"trash_dir": trash})["batches"]
+    assert [(b["id"], b["count"]) for b in batches] == [(res["batch"], 1)]
+    assert os.path.exists(os.path.join(repo, "debug.log"))
+    assert not os.path.exists(os.path.join(repo, "notes", "idea.txt"))
