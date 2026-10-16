@@ -54,3 +54,24 @@ def make_session():
 def user(cwd, text, entry="cli"):
     return {"type": "user", "cwd": cwd, "entrypoint": entry,
             "message": {"role": "user", "content": text}}
+
+
+@pytest.fixture
+def fake_ssh(monkeypatch, tmp_path):
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    script = bindir / "ssh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "while [ \"$1\" = -o ] || [ \"$1\" = -t ]; do\n"
+        "  if [ \"$1\" = -o ]; then shift; fi; shift\n"
+        "done\n"
+        "[ \"$1\" = unreachable ] && { echo 'ssh: connect failed' >&2; exit 255; }\n"
+        "shift\n"
+        "exec sh -c \"$*\"\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated_home"))  # never scan the real ~/.claude
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("PROJ_CACHE", str(cache))
+    return str(cache)
