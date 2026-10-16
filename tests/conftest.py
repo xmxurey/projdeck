@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 
@@ -32,3 +33,24 @@ def make_repo():
             run_git(path, "commit", "-q", "-m", "init")
         return path
     return _make
+
+
+@pytest.fixture
+def make_session():
+    def _make(claude_dir, cwd, sid, records, mtime=None):
+        d = os.path.join(str(claude_dir), "projects", cwd.replace("/", "-"))
+        os.makedirs(d, exist_ok=True)
+        fp = os.path.join(d, sid + ".jsonl")
+        with open(fp, "w") as f:
+            for r in records:
+                f.write(r if isinstance(r, str) else json.dumps(r, separators=(",", ":")))
+                f.write("\n")
+        if mtime:
+            os.utime(fp, (mtime, mtime))
+        return fp
+    return _make
+
+
+def user(cwd, text, entry="cli"):
+    return {"type": "user", "cwd": cwd, "entrypoint": entry,
+            "message": {"role": "user", "content": text}}
