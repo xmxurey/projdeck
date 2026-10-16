@@ -4,6 +4,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -45,7 +46,9 @@ def run_agent(host, req, timeout=20):
     except ValueError:
         err = r.stderr.decode("utf-8", "replace").strip() or "no output (exit %d)" % r.returncode
         raise AgentError(err[-300:])
-    if isinstance(result, dict) and "error" in result:
+    if not isinstance(result, dict):
+        raise AgentError("unexpected agent output: %s" % type(result).__name__)
+    if "error" in result:
         raise AgentError(result["error"])
     return result
 
@@ -64,14 +67,15 @@ def read_cache(name):
 
 def _write_cache(name, data):
     os.makedirs(cache_dir(), exist_ok=True)
-    tmp = _cache_path(name) + ".tmp"
+    path = _cache_path(name)
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
     with open(tmp, "w") as f:
         json.dump(data, f)
-    os.replace(tmp, _cache_path(name))
+    os.replace(tmp, path)
 
 
 def sync_host(host, cfg, now=None):
-    now = int(now or time.time())
+    now = int(time.time()) if now is None else int(now)
     try:
         data = run_agent(host, collector_request(cfg, host), timeout=cfg["ssh_timeout"])
         if data.get("schema") != agent.SCHEMA:
@@ -79,12 +83,15 @@ def sync_host(host, cfg, now=None):
         data.update(host=host["name"], synced_at=now, stale_since=None, last_error=None)
         _write_cache(host["name"], data)
         return {"host": host["name"], "ok": True, "error": None}
-    except AgentError as e:
-        old = read_cache(host["name"])
-        if old:
-            old["stale_since"] = old.get("stale_since") or old.get("synced_at") or now
-            old["last_error"] = str(e)
-            _write_cache(host["name"], old)
+    except (AgentError, OSError) as e:
+        try:
+            old = read_cache(host["name"])
+            if old:
+                old["stale_since"] = old.get("stale_since") or old.get("synced_at") or now
+                old["last_error"] = str(e)
+                _write_cache(host["name"], old)
+        except OSError:
+            pass  # marking stale is best effort; the sync result is still reported
         return {"host": host["name"], "ok": False, "error": str(e)}
 
 
