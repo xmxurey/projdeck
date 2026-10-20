@@ -1,5 +1,6 @@
 """`proj` command line."""
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -59,11 +60,40 @@ def fresh_caches(cfg, now):
     return sync.load_caches(cfg)
 
 
+def log_event(action, host, path, **extra):
+    """Local-only usage log (~/.cache/proj/usage.jsonl), summarised by `proj report`."""
+    ev = dict(ts=int(time.time()), action=action, host=host, path=path, **extra)
+    try:
+        os.makedirs(sync.cache_dir(), exist_ok=True)
+        with open(os.path.join(sync.cache_dir(), "usage.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # never let logging break the tool
+
+
+def read_events(since):
+    out = []
+    try:
+        with open(os.path.join(sync.cache_dir(), "usage.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("ts", 0) >= since:
+                    out.append(ev)
+    except OSError:
+        pass
+    return out
+
+
 def launch(row, path, session=None):
     new_tab = opener.has_iterm()
     inner = opener.resume_inner(session["id"]) if session else None
-    cmd = opener.build_command(row, path, inner, new_tab=new_tab)
+    cmd = opener.build_command(row, path, inner, new_tab=new_tab,
+                               session_id=session["id"] if session else None)
     title = "%s:%s" % (row["host"], os.path.basename(path.rstrip("/")))
+    log_event("resume" if session else "open", row["host"], row["path"])
     return opener.open_command(cmd, title, iterm=new_tab)  # "iterm" or "inline"
 
 
@@ -150,7 +180,8 @@ def cmd_sync(cfg, args):
 def cmd_report(cfg, args):
     now = time.time()
     caches = sync.load_caches(cfg)
-    sys.stdout.write(report.render(model.rows(caches, cfg, now), caches, now))
+    sys.stdout.write(report.render(model.rows(caches, cfg, now), caches, now,
+                                   events=read_events(now - report.USAGE_DAYS * 86400)))
     return 0
 
 
@@ -174,6 +205,7 @@ def clean(cfg, host_name, path):
         return "clean cancelled"
     res = sync.run_agent(host, {"action": "trash", "path": path, "files": chosen,
                                 "trash_dir": cfg["trash_dir"]}, cfg["ssh_timeout"])
+    log_event("clean", host_name, path, moved=len(res["moved"]))
     msg = "moved %d, skipped %d%s" % (len(res["moved"]), len(res["skipped"]),
                                       ("  (batch %s; undo: proj restore)" % res["batch"])
                                       if res["batch"] else "")
@@ -223,6 +255,7 @@ def cmd_restore(cfg, args):
     res = sync.run_agent(config.host_by_name(cfg, host_name),
                          {"action": "restore", "batch": batch_id, "trash_dir": cfg["trash_dir"]},
                          cfg["ssh_timeout"])
+    log_event("restore", host_name, batch_id, restored=len(res["restored"]))
     print("restored %d, skipped %d" % (len(res["restored"]), len(res["skipped"])))
     for s in res["skipped"]:
         print("  skipped (path exists or trash copy missing): %s" % s)

@@ -8,7 +8,29 @@ def _key(r):
     return "`%s:%s`" % (r["host"], r["path"])
 
 
-def render(rows, caches, now):
+USAGE_DAYS = 14
+
+
+def _usage(events):
+    if not events:
+        return ["- no activity logged yet"]
+    counts = {}
+    for e in events:
+        counts[e.get("action")] = counts.get(e.get("action"), 0) + 1
+    out = ["- " + " · ".join("%s %d" % (a, counts[a]) for a in
+                             ("open", "resume", "clean", "restore") if a in counts)]
+    per = {}
+    for e in events:
+        if e.get("action") in ("open", "resume"):
+            k = "`%s:%s`" % (e.get("host"), e.get("path"))
+            per[k] = per.get(k, 0) + 1
+    top = sorted(per.items(), key=lambda kv: -kv[1])[:5]
+    if top:
+        out.append("- most opened: " + ", ".join("%s ×%d" % kv for kv in top))
+    return out
+
+
+def render(rows, caches, now, events=None):
     out = ["# Projects overview (%s)" % time.strftime("%Y-%m-%d %H:%M", time.localtime(now)),
            "", "## Data freshness", ""]
     for c in caches:
@@ -34,4 +56,6 @@ def render(rows, caches, now):
                           for r in rows if r["tier"] == "abandoned"])
     section("Deleted (sessions point to missing dirs)",
             ["- %s" % _key(r) for r in rows if r["tier"] == "deleted"])
+    if events is not None:
+        out.extend(["", "## Your usage, last %d days" % USAGE_DAYS, ""] + _usage(events))
     return "\n".join(out) + "\n"

@@ -4,7 +4,8 @@ import subprocess
 from projdeck import opener
 
 LOCAL = {"local": True, "ssh": None}
-REMOTE = {"local": False, "ssh": "sg"}
+REMOTE = {"local": False, "ssh": "sg", "tmux": False}
+TMUX = {"local": False, "ssh": "sg"}  # tmux defaults on
 
 
 def test_local_commands():
@@ -58,3 +59,43 @@ def test_open_command_falls_back_when_osascript_fails(capsys):
     assert opener.open_command("ls", "t", run=run, iterm=True) == "inline"
     assert calls[-1] == ("ls",)
     assert "iTerm2 automation failed" in capsys.readouterr().err
+
+
+def _run_remote(target, path, inner, tmp_path, with_tmux, session_id=None):
+    remote = shlex.split(opener.build_command(target, path, inner, session_id=session_id))[3]
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    if with_tmux:
+        fake = bindir / "tmux"
+        fake.write_text('#!/bin/sh\necho "tmux pwd=$PWD"; for a in "$@"; do echo "[$a]"; done\n')
+        fake.chmod(0o755)
+    env = {"SHELL": "/bin/sh", "PATH": str(bindir)}  # never the real tmux
+    return subprocess.run(["/bin/sh", "-c", remote], env=env, stdout=subprocess.PIPE,
+                          universal_newlines=True, input="").stdout.splitlines()
+
+
+def test_remote_uses_tmux_session_per_project(tmp_path):
+    d = tmp_path / "my proj"
+    d.mkdir()
+    out = _run_remote(TMUX, str(d), None, tmp_path, with_tmux=True)
+    name = opener.tmux_name(str(d))
+    assert out == ["tmux pwd=%s" % d, "[new-session]", "[-A]", "[-s]", "[%s]" % name]
+    assert name.startswith("proj-my_proj-") and "." not in name and ":" not in name
+    assert opener.tmux_name("/a/x") != opener.tmux_name("/b/x")  # same basename, other dir
+
+
+def test_remote_resume_in_tmux_runs_claude_then_shell(tmp_path):
+    d = tmp_path / "p"
+    d.mkdir()
+    out = _run_remote(TMUX, str(d), opener.resume_inner("abcdef123456"), tmp_path, with_tmux=True,
+                      session_id="abcdef123456")
+    assert out[4] == "[%s]" % opener.tmux_name(str(d), "abcdef123456")
+    assert out[4].endswith("-abcdef12]")
+    assert out[5] == "[\"$SHELL\" -lic 'claude --resume abcdef123456'; exec \"$SHELL\" -l]"
+
+
+def test_remote_without_tmux_falls_back(tmp_path):
+    d = tmp_path / "p"
+    d.mkdir()
+    out = _run_remote(TMUX, str(d), "pwd", tmp_path, with_tmux=False)
+    assert out[0] == str(d)

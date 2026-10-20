@@ -149,3 +149,25 @@ def test_recent_prompts_and_last_reply(tmp_path, make_session):
     s = agent.parse_session(fp)
     assert s["recent"] == ["two", "three", "four " + "y" * 115]  # oldest first, 120 chars max
     assert s["last_reply"] == "done: tests pass"  # last assistant text, tool-only turns skipped
+
+
+def test_collect_marks_live_tmux_sessions(tmp_path, make_repo, monkeypatch):
+    root = tmp_path / "home"
+    repo = make_repo(root / "proj", {"a.py": "1"})
+    monkeypatch.setattr(agent, "tmux_sessions", lambda: [("proj-proj-ab12", repo),
+                                                        ("proj-proj-ab12-s1", repo + "/sub")])
+    out = agent.collect({"roots": [str(root)], "scan_depth": 2, "claude_dir": str(tmp_path / "c")})
+    assert out["projects"][0]["live_tmux"] == ["proj-proj-ab12", "proj-proj-ab12-s1"]
+
+
+def test_tmux_sessions_parses_and_filters(monkeypatch):
+    class R:
+        returncode = 0
+        stdout = "proj-a-1234\t/w/a\nwork\t/w/b\n"
+    monkeypatch.setattr(agent.subprocess, "run", lambda *a, **k: R())
+    assert agent.tmux_sessions() == [("proj-a-1234", "/w/a")]
+
+    def missing(*a, **k):
+        raise FileNotFoundError("tmux")
+    monkeypatch.setattr(agent.subprocess, "run", missing)
+    assert agent.tmux_sessions() == []

@@ -41,6 +41,17 @@ Remote hosts need only `python3` and `git` (the agent is piped over ssh).
 `proj` groups projects by host (in config order), newest first within each host. With
 iTerm2 the list stays open after opening a tab, so you can jump between tasks; Esc quits.
 
+The preview shows where you left off in the latest session (your last prompts and
+Claude's last reply).
+
+Remote projects open inside tmux (`proj-<name>-<hash>` per project, one more per resumed
+session), so claude keeps running when the connection drops; opening again re-attaches.
+`▶n` marks projects with live proj tmux sessions. Detach with `Ctrl-b d`; set
+`"tmux": false` on a host to use a plain shell. Hosts without tmux fall back automatically.
+
+`proj report` ends with a summary of your own usage (opens, resumes, cleans) from the
+local log `~/.cache/proj/usage.jsonl`; nothing leaves the machine.
+
 `proj clean` works on repository roots only (not subdirectories or plain folders).
 On macOS, iTerm2 asks for Automation permission the first time proj opens a tab.
 

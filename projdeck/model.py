@@ -31,6 +31,7 @@ def rows(caches, cfg, now):
             r = dict(ROW_DEFAULTS)
             r.update(p)
             r.update(host=c["host"], local=bool(h.get("local")), ssh=h.get("ssh"),
+                     tmux=h.get("tmux", True),
                      activity=last_activity(p), tier=tier(p, now, cfg["tiers_days"]),
                      stale_since=c.get("stale_since"))
             out.append(r)

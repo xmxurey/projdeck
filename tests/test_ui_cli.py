@@ -313,3 +313,27 @@ def test_preview_shows_where_you_left_off():
     assert lines[i + 1:i + 4] == ["  › add tests", "  › run them", "  ⏺ all 12 pass"]
     assert i < lines.index("progress:")
     assert "left off" not in ui.preview_text(row(sessions=[dict(s, recent=[], last_reply="")]), NOW)
+
+
+def test_live_tmux_flag_and_preview():
+    r = row(live_tmux=["proj-quant-ab12"])
+    assert "▶1" in ui.project_line(r, NOW).split("\t")[2]
+    assert "▶ live tmux: proj-quant-ab12" in ui.preview_text(r, NOW)
+    assert "▶" not in ui.project_line(row(), NOW)
+
+
+def test_usage_log_and_report_section(tmp_path, monkeypatch, capsys, make_repo):
+    p1 = setup_env(tmp_path, monkeypatch, make_repo)
+    assert cli.main(["sync"]) == 0
+    monkeypatch.setattr(cli.opener, "open_command", lambda cmd, title, iterm=None: "iterm")
+    monkeypatch.setattr(cli.opener, "has_iterm", lambda: True)
+    r = {"host": "local", "local": True, "path": p1}
+    cli.launch(r, p1)
+    cli.launch(r, p1, {"id": "s1", "cwd": p1})
+    events = [json.loads(ln) for ln in open(tmp_path / "cache" / "usage.jsonl")]
+    assert [(e["action"], e["host"], e["path"]) for e in events] == [
+        ("open", "local", p1), ("resume", "local", p1)]
+    capsys.readouterr()
+    assert cli.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "## Your usage, last 14 days" in out and "open 1 · resume 1" in out

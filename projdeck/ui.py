@@ -50,6 +50,8 @@ def _name(path):
 def project_line(r, now):
     g = r.get("git") or {}
     flags = []
+    if r.get("live_tmux"):
+        flags.append("▶%d" % len(r["live_tmux"]))
     if g.get("dirty"):
         flags.append("±%d" % g["dirty"])
     if g.get("ahead"):
@@ -105,6 +107,8 @@ def preview_text(r, now):
         out.append("not a git repo")
     else:
         out.append("directory no longer exists")
+    if r.get("live_tmux"):
+        out.append("▶ live tmux: %s" % ", ".join(r["live_tmux"]))
     s = latest_session(r)
     if s and (s.get("recent") or s.get("last_reply")):
         out.extend(["", "left off · %s · %s ago" % (s["title"], human_age(now - s["last_ts"]))])

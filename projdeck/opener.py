@@ -1,5 +1,7 @@
 """Build the shell command for a project/session and open it in iTerm2."""
+import hashlib
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -12,19 +14,36 @@ def resume_inner(session_id):
     return "claude --resume %s" % q(session_id)
 
 
-def _remote_script(path, inner):
+def tmux_name(path, session_id=None):
+    """Stable tmux session name: project name + short path hash (+ Claude session)."""
+    base = re.sub(r"[^A-Za-z0-9_-]", "_", os.path.basename(path.rstrip("/")) or "root")[:24]
+    name = "proj-%s-%s" % (base, hashlib.sha1(path.encode("utf-8")).hexdigest()[:4])
+    return name + ("-" + session_id[:8] if session_id else "")
+
+
+def _remote_script(path, inner, tmux=False, session_id=None):
     if inner is None:
-        return "cd %s && %s" % (q(path), LOGIN_SHELL)
-    # login + interactive so PATH (claude) is set; keep a shell open afterwards
-    return 'cd %s && "$SHELL" -lic %s; %s' % (q(path), q(inner), LOGIN_SHELL)
+        rest = LOGIN_SHELL
+    else:
+        # login + interactive so PATH (claude) is set; keep a shell open afterwards
+        rest = '"$SHELL" -lic %s; %s' % (q(inner), LOGIN_SHELL)
+    if not tmux:
+        return "cd %s && %s" % (q(path), rest)
+    # tmux keeps the remote shell/claude alive when the connection drops; -A re-attaches
+    new = "tmux new-session -A -s %s" % q(tmux_name(path, session_id))
+    if inner is not None:
+        new += " " + q(rest)
+    return "cd %s && if command -v tmux >/dev/null 2>&1; then exec %s; else %s; fi" % (
+        q(path), new, rest)
 
 
-def build_command(target, path, inner=None, new_tab=True):
+def build_command(target, path, inner=None, new_tab=True, session_id=None):
     if target.get("local"):
         if inner is None and not new_tab:
             inner = LOGIN_SHELL
         return "cd %s" % q(path) + (" && %s" % inner if inner else "")
-    return "ssh -t %s %s" % (q(target["ssh"]), q(_remote_script(path, inner)))
+    script = _remote_script(path, inner, tmux=target.get("tmux", True), session_id=session_id)
+    return "ssh -t %s %s" % (q(target["ssh"]), q(script))
 
 
 def _as_str(s):

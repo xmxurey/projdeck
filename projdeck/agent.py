@@ -336,6 +336,24 @@ def build_project(path, patterns):
     return p
 
 
+def tmux_sessions():
+    """(name, start dir) of live tmux sessions that proj opened; [] without tmux."""
+    try:
+        r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}\t#{session_path}"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           universal_newlines=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:  # e.g. no server running
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        name, _, path = line.partition("\t")
+        if name.startswith("proj-") and path:
+            out.append((name, path))
+    return out
+
+
 def collect(req):
     patterns = req.get("patterns") or DEFAULT_PATTERNS
     paths = discover(req.get("roots") or ["~"], int(req.get("scan_depth", 2)),
@@ -352,6 +370,10 @@ def collect(req):
         projects[owner(s["cwd"], list(projects))]["sessions"].append(s)
     for p in projects.values():
         p["sessions"].sort(key=lambda s: -s["last_ts"])
+    for name, path in tmux_sessions():
+        o = owner(path, list(projects))
+        if o:
+            projects[o].setdefault("live_tmux", []).append(name)
     return {"schema": SCHEMA,
             "host": req.get("host") or socket.gethostname().split(".")[0],
             "collected_at": int(time.time()),
