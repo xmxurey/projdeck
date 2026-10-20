@@ -64,49 +64,59 @@ def launch(row, path, session=None):
     inner = opener.resume_inner(session["id"]) if session else None
     cmd = opener.build_command(row, path, inner, new_tab=new_tab)
     title = "%s:%s" % (row["host"], os.path.basename(path.rstrip("/")))
-    opener.open_command(cmd, title, iterm=new_tab)
-    return 0
+    return opener.open_command(cmd, title, iterm=new_tab)  # "iterm" or "inline"
 
 
 def cmd_browse(cfg, args):
+    """Project overview. Stays open after opening a tab in iTerm2, so you can switch
+    between tasks; without iTerm2 the command runs here and proj exits."""
     now = time.time()
     caches = fresh_caches(cfg, now)
+    notice = last = None
     while True:
         rows = model.rows(caches, cfg, now)
         if not rows:
             print("no projects found; check roots in %s" % config.config_path())
             return 1
         try:
-            key, host, path = ui.pick_project(rows, now)
+            key, host, path = ui.pick_project(rows, now, notice, last)
         except ui.Cancelled:
             return 0
-        r = model.find_row(rows, host, path)
+        notice, last = None, (host, path)
         if key == "ctrl-u":
-            print_sync(sync.sync_all(cfg))
+            notice = "sync: " + ", ".join("%s %s" % (s["host"], "ok" if s["ok"] else "FAILED")
+                                          for s in sync.sync_all(cfg))
             caches, now = sync.load_caches(cfg), time.time()
             continue
+        r = model.find_row(rows, host, path)
+        if r is None:  # a host header line
+            continue
+        name = "%s:%s" % (host, os.path.basename(path.rstrip("/")))
         if key == "ctrl-x":
-            return clean(cfg, host, path)
+            notice = clean(cfg, host, path)
+            continue
+        session = None
         if key == "ctrl-r":
-            s = model.latest_session(r)
-            if s is None:
-                print("no sessions for this project")
+            session = model.latest_session(r)
+            if session is None:
+                notice = "no sessions for %s" % name
                 continue
-            return launch(r, s["cwd"], s)
-        if key == "ctrl-s":
+        elif key == "ctrl-s":
             if not r["sessions"]:
-                print("no sessions for this project")
+                notice = "no sessions for %s" % name
                 continue
             try:
                 _, _, sid = ui.pick_session([(r, s) for s in r["sessions"]], now)
             except ui.Cancelled:
                 continue
-            s = next(s for s in r["sessions"] if s["id"] == sid)
-            return launch(r, s["cwd"], s)
-        if not r["exists"]:
-            print("directory no longer exists: %s" % path)
+            session = next(s for s in r["sessions"] if s["id"] == sid)
+        elif not r["exists"]:
+            notice = "directory no longer exists: %s" % path
             continue
-        return launch(r, path)
+        if launch(r, session["cwd"] if session else path, session) != "iterm":
+            return 0
+        notice = "opened %s%s in a new iTerm2 tab" % (name, " (resume)" if session else "")
+        caches, now = sync.load_caches(cfg), time.time()
 
 
 def cmd_sessions(cfg, args):
@@ -122,7 +132,8 @@ def cmd_sessions(cfg, args):
         return 0
     r = model.find_row(rows, host, path)
     s = next(s for s in r["sessions"] if s["id"] == sid)
-    return launch(r, s["cwd"], s)
+    launch(r, s["cwd"], s)
+    return 0
 
 
 def cmd_sync(cfg, args):
@@ -148,33 +159,36 @@ def clean(cfg, host_name, path):
     listing = sync.run_agent(host, {"action": "list", "path": path,
                                     "patterns": cfg["suspicious_patterns"]}, cfg["ssh_timeout"])
     if not listing["files"]:
-        print("no untracked files in %s:%s" % (host_name, path))
-        return 0
+        msg = "no untracked files in %s:%s" % (host_name, path)
+        print(msg)
+        return msg
     try:
         chosen = ui.pick_files(listing["files"], preview=ui.file_preview_cmd(host_name, listing["path"]))
     except ui.Cancelled:
-        return 0
+        return "clean cancelled"
     if not chosen:
-        return 0
+        return "clean: nothing selected"
     print("\n".join("  " + c for c in chosen))
     if _ask("move %d file(s) to %s on %s? [y/N] " % (len(chosen), cfg["trash_dir"], host_name)) \
             .strip().lower() != "y":
-        return 0
+        return "clean cancelled"
     res = sync.run_agent(host, {"action": "trash", "path": path, "files": chosen,
                                 "trash_dir": cfg["trash_dir"]}, cfg["ssh_timeout"])
-    print("moved %d, skipped %d%s" % (len(res["moved"]), len(res["skipped"]),
-                                       ("  (batch %s; undo: proj restore)" % res["batch"])
-                                       if res["batch"] else ""))
+    msg = "moved %d, skipped %d%s" % (len(res["moved"]), len(res["skipped"]),
+                                      ("  (batch %s; undo: proj restore)" % res["batch"])
+                                      if res["batch"] else "")
+    print(msg)
     for s in res["skipped"]:
         print("  skipped (no longer untracked or unsafe): %s" % s)
-    return 0
+    return msg
 
 
 def cmd_clean(cfg, args):
     host, sep, path = args.target.partition(":")
     if not sep:
         raise SystemExit("usage: proj clean HOST:PATH")
-    return clean(cfg, host, path)
+    clean(cfg, host, path)
+    return 0
 
 
 def _all_batches(cfg, host_name):
@@ -250,8 +264,12 @@ def cmd_trash(cfg, args):
 
 def cmd_preview(cfg, args):
     now = time.time()
-    r = model.find_row(model.rows(sync.load_caches(cfg), cfg, now), args.host.rstrip("\t"),
-                       args.path.rstrip("\t"))
+    host, path = args.host.rstrip("\t"), args.path.rstrip("\t")
+    caches = sync.load_caches(cfg)
+    if not path:
+        print(ui.host_preview_text(host, caches, model.rows(caches, cfg, now), now))
+        return 0
+    r = model.find_row(model.rows(caches, cfg, now), host, path)
     print(ui.preview_text(r, now) if r else "(not in cache)")
     return 0
 

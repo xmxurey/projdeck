@@ -7,7 +7,7 @@ jump into one in a new iTerm2 tab, and clean stray untracked files reversibly.
 
 ```bash
 brew install fzf
-git clone <this repo> ~/dev/projdeck
+git clone git@github.com:xmxurey/projdeck.git ~/dev/projdeck
 ln -s ~/dev/projdeck/bin/proj /usr/local/bin/proj   # or any dir on PATH
 ```
 Remote hosts need only `python3` and `git` (the agent is piped over ssh).
@@ -37,6 +37,9 @@ Remote hosts need only `python3` and `git` (the agent is piped over ssh).
 | `proj clean HOST:PATH` | move untracked junk to `~/.proj-trash` (never ignored files) |
 | `proj restore [host]` | put a batch back |
 | `proj trash [--purge --older 30d]` | list / permanently delete old batches |
+
+`proj` groups projects by host (in config order), newest first within each host. With
+iTerm2 the list stays open after opening a tab, so you can jump between tasks; Esc quits.
 
 `proj clean` works on repository roots only (not subdirectories or plain folders).
 On macOS, iTerm2 asks for Automation permission the first time proj opens a tab.

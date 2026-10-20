@@ -34,7 +34,9 @@ def rows(caches, cfg, now):
                      activity=last_activity(p), tier=tier(p, now, cfg["tiers_days"]),
                      stale_since=c.get("stale_since"))
             out.append(r)
-    out.sort(key=lambda r: -r["activity"])
+    # group by host in config order (unknown hosts last), newest first within a host
+    order = {h["name"]: i for i, h in enumerate(cfg["hosts"])}
+    out.sort(key=lambda r: (order.get(r["host"], len(order)), r["host"], -r["activity"]))
     return out
 
 

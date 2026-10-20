@@ -62,9 +62,20 @@ def project_line(r, now):
         flags.append("💬%d" % len(r["sessions"]))
     if not r.get("git") and r["exists"]:
         flags.append("non-git")
-    display = "%-8s %s %-28s %5s  %s" % (r["host"][:8], TIER_ICON[r["tier"]], _name(r["path"])[:28],
-                                         human_age(now - r["activity"]), " ".join(flags))
+    display = "%s %-28s %5s  %s" % (TIER_ICON[r["tier"]], _name(r["path"])[:28],
+                                    human_age(now - r["activity"]), " ".join(flags))
     return SEP.join([r["host"], r["path"], display])
+
+
+def project_lines(rows, now):
+    """Project lines with a header line (empty path field) before each host's group."""
+    lines, host = [], None
+    for r in rows:
+        if r["host"] != host:
+            host = r["host"]
+            lines.append(SEP.join([host, "", "── %s %s" % (host, "─" * max(3, 40 - len(host)))]))
+        lines.append(project_line(r, now))
+    return lines
 
 
 def session_line(r, s, now):
@@ -110,10 +121,35 @@ def preview_text(r, now):
     return "\n".join(out)
 
 
-def pick_project(rows, now):
-    lines = [project_line(r, now) for r in rows]
-    key, sel = run_fzf(lines, ["--delimiter=\t", "--with-nth=3..", "--tiebreak=index",
-                               "--header=" + PROJECT_HEADER, "--preview=" + preview_cmd(),
+def host_preview_text(host, caches, rows, now):
+    mine = [r for r in rows if r["host"] == host]
+    out = ["%s: %d project%s" % (host, len(mine), "" if len(mine) == 1 else "s")]
+    for c in caches:
+        if c["host"] == host:
+            out.append("synced %s ago" % human_age(now - (c.get("synced_at") or 0)))
+            if c.get("stale_since"):
+                out.append("⚠ last sync failed: %s" % c.get("last_error"))
+    for t in ("active", "stale", "abandoned", "deleted"):
+        n = sum(1 for r in mine if r["tier"] == t)
+        if n:
+            out.append("  %s %s: %d" % (TIER_ICON[t], t, n))
+    return "\n".join(out)
+
+
+def pick_project(rows, now, notice=None, select=None):
+    """select: (host, path) to put the cursor on, e.g. the project opened last."""
+    header = PROJECT_HEADER + ("\n" + notice if notice else "")
+    lines = project_lines(rows, now)
+    extra = []
+    if select:
+        want = SEP.join(select) + SEP
+        pos = next((i for i, ln in enumerate(lines, 1) if ln.startswith(want)), None)
+        if pos:
+            extra.append("--bind=load:pos(%d)" % pos)
+    # --no-sort keeps the host grouping while filtering
+    key, sel = run_fzf(lines, extra + [
+                               "--delimiter=\t", "--with-nth=3..", "--no-sort", "--layout=reverse",
+                               "--header=" + header, "--preview=" + preview_cmd(),
                                "--preview-window=right,50%,wrap"], expect=PROJECT_KEYS)
     if not sel:
         raise Cancelled()

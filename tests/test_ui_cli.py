@@ -239,3 +239,67 @@ def test_fpreview_remote_builds_quoted_ssh(monkeypatch):
     assert calls[0][:2] == ["ssh", "-o"] and calls[0][-2] == "vm"
     assert "'/home/u/a b.log'" in calls[0][-1]
 
+
+
+def test_project_lines_insert_host_headers():
+    rows = [row(host="mac", path="/a"), row(host="mac", path="/b"), row(host="vm", path="/c")]
+    lines = ui.project_lines(rows, NOW)
+    assert [ln.split("\t")[:2] for ln in lines] == [
+        ["mac", ""], ["mac", "/a"], ["mac", "/b"], ["vm", ""], ["vm", "/c"]]
+    assert "── mac" in lines[0].split("\t")[2]
+
+
+def test_browse_stays_open_after_iterm_launch(monkeypatch):
+    cfg = {"hosts": [{"name": "vm", "ssh": "vm"}], "tiers_days": {"active": 14, "stale": 90}}
+    cache = {"host": "vm", "projects": [row(path="/p")]}
+    monkeypatch.setattr(cli, "fresh_caches", lambda cfg, now: [cache])
+    monkeypatch.setattr(cli.sync, "load_caches", lambda cfg: [cache])
+    picks = iter([("", "vm", ""), ("", "vm", "/p"), ("ctrl-r", "vm", "/p")])
+    notices = []
+
+    def fake_pick(rows, now, notice=None, select=None):
+        notices.append(notice)
+        try:
+            return next(picks)
+        except StopIteration:
+            raise ui.Cancelled()
+    monkeypatch.setattr(ui, "pick_project", fake_pick)
+    launched = []
+    monkeypatch.setattr(cli, "launch", lambda r, path, s=None: launched.append((path, s and s["id"])) or "iterm")
+    assert cli.cmd_browse(cfg, None) == 0
+    assert launched == [("/p", None), ("/home/u/quant", "s1")]  # header row ignored
+    assert len(notices) == 4 and "opened" in notices[2]
+
+
+def test_browse_exits_after_inline_launch(monkeypatch):
+    cfg = {"hosts": [{"name": "vm", "ssh": "vm"}], "tiers_days": {"active": 14, "stale": 90}}
+    cache = {"host": "vm", "projects": [row(path="/p")]}
+    monkeypatch.setattr(cli, "fresh_caches", lambda cfg, now: [cache])
+    calls = []
+    monkeypatch.setattr(ui, "pick_project", lambda rows, now, notice=None, select=None: calls.append(1) or ("", "vm", "/p"))
+    monkeypatch.setattr(cli, "launch", lambda r, path, s=None: "inline")
+    assert cli.cmd_browse(cfg, None) == 0
+    assert calls == [1]
+
+
+def test_preview_of_host_header(tmp_path, monkeypatch, capsys, make_repo):
+    setup_env(tmp_path, monkeypatch, make_repo)
+    assert cli.main(["sync"]) == 0
+    capsys.readouterr()
+    assert cli.main(["_preview", "local", "\t"]) == 0
+    out = capsys.readouterr().out
+    assert "local" in out and "1 project" in out
+
+
+def test_pick_project_keeps_cursor_on_selected(monkeypatch):
+    captured = {}
+
+    def fake_fzf(lines, args, expect=()):
+        captured["args"] = args
+        return "", [lines[2]]
+    monkeypatch.setattr(ui, "run_fzf", fake_fzf)
+    rows = [row(host="mac", path="/a"), row(host="mac", path="/b")]
+    assert ui.pick_project(rows, NOW, select=("mac", "/b")) == ("", "mac", "/b")
+    assert "--bind=load:pos(3)" in captured["args"]  # line 1 is the "── mac" header
+    ui.pick_project(rows, NOW, select=("mac", "/gone"))
+    assert not any(a.startswith("--bind=load:pos") for a in captured["args"])

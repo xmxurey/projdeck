@@ -29,13 +29,17 @@ def test_tiers_and_activity():
 
 
 def test_rows_merge_hosts_and_sort():
-    caches = [{"host": "mac", "projects": [proj("/old", mtime=NOW - 100 * DAY)]},
-              {"host": "vm", "stale_since": 5, "projects": [proj("/new", mtime=NOW - DAY)]}]
+    # grouped by host in config order (unknown hosts last), newest first within a host
+    caches = [{"host": "zz", "projects": [proj("/z", mtime=NOW)]},
+              {"host": "vm", "stale_since": 5, "projects": [proj("/new", mtime=NOW - DAY)]},
+              {"host": "mac", "projects": [proj("/old", mtime=NOW - 100 * DAY),
+                                           proj("/mid", mtime=NOW - 20 * DAY)]}]
     rows = model.rows(caches, CFG, NOW)
     assert [(r["host"], r["path"], r["tier"]) for r in rows] == [
-        ("vm", "/new", "active"), ("mac", "/old", "abandoned")]
-    assert rows[0]["ssh"] == "vm-alias" and rows[0]["local"] is False and rows[0]["stale_since"] == 5
-    assert rows[1]["local"] is True
+        ("mac", "/mid", "stale"), ("mac", "/old", "abandoned"), ("vm", "/new", "active"),
+        ("zz", "/z", "active")]
+    assert rows[2]["ssh"] == "vm-alias" and rows[2]["local"] is False and rows[2]["stale_since"] == 5
+    assert rows[0]["local"] is True
     assert model.find_row(rows, "mac", "/old") is rows[1]
     assert model.find_row(rows, "mac", "/nope") is None
 
