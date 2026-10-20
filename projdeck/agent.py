@@ -9,6 +9,7 @@ import fnmatch
 import json
 import os
 import re
+from collections import deque
 import shutil
 import socket
 import subprocess
@@ -193,6 +194,27 @@ def _text_of(message):
     return ""
 
 
+def _is_prompt(text):
+    t = text.lstrip()
+    return bool(t) and not t.startswith("<") and not t.startswith("[Request interrupted")
+
+
+def _last_texts(raw_lines, kind, keep):
+    """Parse buffered raw lines; return the last `keep` texts of messages of type `kind`."""
+    out = []
+    for line in raw_lines:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == kind:
+            text = _text_of(d.get("message"))
+            if kind != "user" or _is_prompt(text):
+                if text.strip():
+                    out.append(text)
+    return out[-keep:]
+
+
 def one_line(s, n=80):
     return " ".join(s.split())[:n]
 
@@ -202,6 +224,8 @@ def parse_session(fp):
     changes between versions, so every field is optional and bad lines are skipped."""
     sid = os.path.basename(fp)[:-len(".jsonl")]
     cwd = entry = custom = ai = first = None
+    # raw lines only: parsing every message of a big transcript would be slow
+    users, replies = deque(maxlen=12), deque(maxlen=6)
     with open(fp, encoding="utf-8", errors="replace") as f:
         for line in f:
             if cwd is None:
@@ -224,20 +248,22 @@ def parse_session(fp):
                     custom = d["customTitle"]
                 elif d.get("type") == "ai-title" and d.get("aiTitle"):
                     ai = d["aiTitle"]
-            elif first is None and '"type":"user"' in line:
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                text = _text_of(d.get("message")) if d.get("type") == "user" else ""
-                if text.strip() and not text.lstrip().startswith("<"):
-                    first = text
+            elif '"type":"user"' in line and '"tool_result"' not in line:
+                users.append(line)
+                if first is None:
+                    found = _last_texts([line], "user", 1)
+                    if found:
+                        first = found[0]
+            elif '"type":"assistant"' in line and '"type":"text"' in line:
+                replies.append(line)
     if cwd is None:
         return None
     st = os.stat(fp)
     title = custom or ai or (one_line(first) if first else "") or "(untitled)"
     return {"id": sid, "cwd": cwd, "title": one_line(title), "last_ts": int(st.st_mtime),
-            "size_kb": st.st_size // 1024, "headless": entry == "sdk-cli"}
+            "size_kb": st.st_size // 1024, "headless": entry == "sdk-cli",
+            "recent": [one_line(t, 120) for t in _last_texts(users, "user", 3)],
+            "last_reply": one_line((_last_texts(replies, "assistant", 1) or [""])[0], 200)}
 
 
 def scan_sessions(claude_dir):

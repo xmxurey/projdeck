@@ -303,3 +303,13 @@ def test_pick_project_keeps_cursor_on_selected(monkeypatch):
     assert "--bind=load:pos(3)" in captured["args"]  # line 1 is the "── mac" header
     ui.pick_project(rows, NOW, select=("mac", "/gone"))
     assert not any(a.startswith("--bind=load:pos") for a in captured["args"])
+
+
+def test_preview_shows_where_you_left_off():
+    s = dict(row()["sessions"][0], recent=["add tests", "run them"], last_reply="all 12 pass")
+    text = ui.preview_text(row(sessions=[s]), NOW)
+    lines = text.splitlines()
+    i = lines.index("left off · fix rebate · 1h ago")
+    assert lines[i + 1:i + 4] == ["  › add tests", "  › run them", "  ⏺ all 12 pass"]
+    assert i < lines.index("progress:")
+    assert "left off" not in ui.preview_text(row(sessions=[dict(s, recent=[], last_reply="")]), NOW)

@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from projdeck.model import TIER_ICON, human_age, n_suspicious
+from projdeck.model import TIER_ICON, human_age, latest_session, n_suspicious
 
 SEP = "\t"
 PROJECT_KEYS = ["ctrl-r", "ctrl-s", "ctrl-x", "ctrl-u"]
@@ -105,6 +105,12 @@ def preview_text(r, now):
         out.append("not a git repo")
     else:
         out.append("directory no longer exists")
+    s = latest_session(r)
+    if s and (s.get("recent") or s.get("last_reply")):
+        out.extend(["", "left off · %s · %s ago" % (s["title"], human_age(now - s["last_ts"]))])
+        out.extend("  › " + p for p in s.get("recent") or [])
+        if s.get("last_reply"):
+            out.append("  ⏺ " + s["last_reply"])
     if r["suspicious"]:
         out.append("")
         out.append("suspicious files (%d):" % n_suspicious(r))

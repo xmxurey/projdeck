@@ -19,7 +19,8 @@ def test_title_priority_custom_over_ai_over_prompt(tmp_path, make_session):
     ], mtime=5000)
     s = agent.parse_session(fp)
     assert s == {"id": "s1", "cwd": cwd, "title": "My name", "last_ts": 5000,
-                 "size_kb": 0, "headless": False}
+                 "size_kb": 0, "headless": False, "recent": ["first real prompt"],
+                 "last_reply": ""}
 
 
 def test_title_falls_back_to_first_prompt_and_headless(tmp_path, make_session):
@@ -125,3 +126,26 @@ def test_suspicious_list_is_capped_but_counted(tmp_path, make_repo, monkeypatch)
     monkeypatch.setattr(agent, "SUSPICIOUS_CAP", 3)
     p = agent.build_project(repo, agent.DEFAULT_PATTERNS)
     assert len(p["suspicious"]) == 3 and p["suspicious_count"] == 5
+
+
+def assistant(cwd, *blocks):
+    return {"type": "assistant", "cwd": cwd, "message": {"role": "assistant", "content": list(blocks)}}
+
+
+def test_recent_prompts_and_last_reply(tmp_path, make_session):
+    cwd = "/w/p"
+    tool_result = {"type": "user", "cwd": cwd, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
+    fp = make_session(tmp_path, cwd, "s4", [
+        user(cwd, "one"), assistant(cwd, {"type": "text", "text": "reply one"}),
+        user(cwd, "two"), user(cwd, "three"),
+        assistant(cwd, {"type": "text", "text": "done:  tests\npass"}),
+        user(cwd, "four " + "y" * 300),
+        assistant(cwd, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}),
+        tool_result,
+        user(cwd, "[Request interrupted by user]"),
+        user(cwd, "<command-name>/compact</command-name>"),
+    ])
+    s = agent.parse_session(fp)
+    assert s["recent"] == ["two", "three", "four " + "y" * 115]  # oldest first, 120 chars max
+    assert s["last_reply"] == "done: tests pass"  # last assistant text, tool-only turns skipped
