@@ -99,3 +99,8 @@ def test_remote_without_tmux_falls_back(tmp_path):
     d.mkdir()
     out = _run_remote(TMUX, str(d), "pwd", tmp_path, with_tmux=False)
     assert out[0] == str(d)
+
+
+def test_applescript_title_newlines_flattened():
+    s = opener.applescript("ls", "a\nb\rc")
+    assert 'set name to "a b c"' in s

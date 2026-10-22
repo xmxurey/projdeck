@@ -67,6 +67,11 @@ def latest_session(row):
     return sessions[0] if sessions else None
 
 
+def sync_age(cache, now):
+    t = cache.get("synced_at")
+    return "synced %s ago" % human_age(now - t) if t else "never synced"
+
+
 def human_age(seconds):
     s = max(0, int(seconds))
     for unit, n in (("y", 365 * 86400), ("mo", 30 * 86400), ("d", 86400), ("h", 3600),

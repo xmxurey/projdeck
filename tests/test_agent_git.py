@@ -80,3 +80,17 @@ def test_discover_repos_and_plain_dirs(tmp_path, make_repo):
     found = agent.discover([str(tmp_path)], depth=2)
     assert found == sorted([str(tmp_path / "a"), str(tmp_path / "group" / "b"), str(tmp_path / "plain")])
     assert str(tmp_path / "plain") not in agent.discover([str(tmp_path)], 2, include_plain=False)
+
+
+def test_git_timeout_and_missing_binary_become_runtime_errors(tmp_path, monkeypatch):
+    import subprocess
+    import pytest
+
+    def boom(exc):
+        def run(*a, **k):
+            raise exc
+        return run
+    for exc in (subprocess.TimeoutExpired("git", 5), FileNotFoundError("git")):
+        monkeypatch.setattr(agent.subprocess, "run", boom(exc))
+        with pytest.raises(RuntimeError, match="git"):
+            agent.git(str(tmp_path), "status")

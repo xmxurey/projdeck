@@ -169,3 +169,25 @@ def test_load_batches_skips_bad_manifest(tmp_path):
     with open(os.path.join(trash, "weird", "manifest.json"), "w") as f:
         f.write("[1]")
     assert [b["id"] for b in agent.ACTIONS["batches"]({"trash_dir": trash})["batches"]] == ["good"]
+
+
+def test_restore_ignores_tampered_manifest_paths(repo, tmp_path):
+    import json
+    trash = str(tmp_path / "trash")
+    res = agent.ACTIONS["trash"]({"path": repo, "files": ["debug.log", "notes/idea.txt"],
+                                  "trash_dir": trash})
+    batch_dir = os.path.join(trash, res["batch"])
+    mf = os.path.join(batch_dir, "manifest.json")
+    with open(mf) as f:
+        m = json.load(f)
+    outside = str(tmp_path / "elsewhere" / "debug.log")
+    m["items"][0]["src"] = outside                        # src escapes the project
+    m["items"][1]["dst"] = os.path.join(repo, "keep.py")  # dst escapes the batch
+    with open(mf, "w") as f:
+        json.dump(m, f)
+    back = agent.ACTIONS["restore"]({"batch": res["batch"], "trash_dir": trash})
+    assert back["restored"] == [] and len(back["skipped"]) == 2
+    assert not os.path.exists(outside)
+    assert os.path.exists(os.path.join(repo, "keep.py"))
+    with open(mf) as f:
+        assert len(json.load(f)["items"]) == 2  # nothing dropped

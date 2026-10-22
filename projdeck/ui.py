@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from projdeck.model import TIER_ICON, human_age, latest_session, n_suspicious
+from projdeck.model import TIER_ICON, human_age, latest_session, n_suspicious, sync_age
 
 SEP = "\t"
 PROJECT_KEYS = ["ctrl-r", "ctrl-s", "ctrl-x", "ctrl-u"]
@@ -136,7 +136,7 @@ def host_preview_text(host, caches, rows, now):
     out = ["%s: %d project%s" % (host, len(mine), "" if len(mine) == 1 else "s")]
     for c in caches:
         if c["host"] == host:
-            out.append("synced %s ago" % human_age(now - (c.get("synced_at") or 0)))
+            out.append(sync_age(c, now))
             if c.get("stale_since"):
                 out.append("⚠ last sync failed: %s" % c.get("last_error"))
     for t in ("active", "stale", "abandoned", "deleted"):

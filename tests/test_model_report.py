@@ -88,3 +88,24 @@ def test_suspicious_count_prefers_total_and_report_tolerates_missing_keys():
     assert model.n_suspicious(rows[0]) == 250 and model.n_suspicious({}) == 0
     md = report.render(rows, caches, NOW)
     assert "`mac:/many` 250 files: a.log" in md
+
+
+def test_never_synced_host_is_not_56_years_old():
+    caches = [{"host": "vm", "synced_at": 0, "stale_since": NOW, "last_error": "down",
+               "projects": []}]
+    md = report.render([], caches, NOW)
+    assert "- vm: never synced ⚠ last sync failed: down" in md
+    assert model.sync_age(caches[0], NOW) == "never synced"
+    assert model.sync_age({"synced_at": NOW - 3600}, NOW) == "synced 1h ago"
+
+
+def test_report_no_upstream_and_suspicious_cap():
+    projects = [proj("/p%02d" % i, mtime=NOW, suspicious=["x%d.log" % j for j in range(i + 1)])
+                for i in range(20)]
+    projects[0]["git"]["no_upstream"] = True
+    caches = [{"host": "mac", "synced_at": NOW, "stale_since": None, "projects": projects}]
+    md = report.render(model.rows(caches, CFG, NOW), caches, NOW)
+    assert "## No upstream branch (1)\n\n- `mac:/p00`\n" in md
+    assert "## Suspicious untracked files (15)" in md
+    assert "`mac:/p19` 20 files: x0.log, x1.log, x2.log, x3.log, x4.log\n" in md
+    assert "`mac:/p04`" not in md.split("## Suspicious")[1].split("## Abandoned")[0]

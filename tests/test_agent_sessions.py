@@ -171,3 +171,8 @@ def test_tmux_sessions_parses_and_filters(monkeypatch):
         raise FileNotFoundError("tmux")
     monkeypatch.setattr(agent.subprocess, "run", missing)
     assert agent.tmux_sessions() == []
+
+
+def test_unknown_action_names_it(capsys):
+    agent.main(["agent.py", json.dumps({"action": "nope"})])
+    assert json.loads(capsys.readouterr().out)["error"] == "ValueError: unknown action 'nope'"

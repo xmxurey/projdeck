@@ -1,7 +1,7 @@
 """Markdown overview: what needs attention across all hosts."""
 import time
 
-from projdeck.model import human_age, n_suspicious
+from projdeck.model import human_age, n_suspicious, sync_age
 
 
 def _key(r):
@@ -34,7 +34,7 @@ def render(rows, caches, now, events=None):
     out = ["# Projects overview (%s)" % time.strftime("%Y-%m-%d %H:%M", time.localtime(now)),
            "", "## Data freshness", ""]
     for c in caches:
-        line = "- %s: synced %s ago" % (c["host"], human_age(now - (c.get("synced_at") or 0)))
+        line = "- %s: %s" % (c["host"], sync_age(c, now))
         if c.get("stale_since"):
             line += " ⚠ last sync failed: %s" % c.get("last_error")
         out.append(line)

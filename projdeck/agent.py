@@ -32,8 +32,13 @@ HOME_SKIP = {"Library", "Applications", "Movies", "Music", "Pictures", "Public",
 
 
 def git(path, *args):
-    r = subprocess.run(["git", "-C", path] + list(args), stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, timeout=GIT_TIMEOUT)
+    try:
+        r = subprocess.run(["git", "-C", path] + list(args), stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("git timed out after %ds" % GIT_TIMEOUT)
+    except OSError as e:
+        raise RuntimeError("cannot run git: %s" % e)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.decode("utf-8", "replace").strip() or "git failed")
     return r.stdout.decode("utf-8", "replace")
@@ -477,6 +482,11 @@ def _check_batch_id(batch_id):
         raise ValueError("bad batch id %r" % (batch_id,))
 
 
+def _inside(p, root):
+    p, root = os.path.normpath(p), os.path.normpath(root)
+    return os.path.isabs(p) and p.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def act_restore(req):
     batch_id = req["batch"]
     _check_batch_id(batch_id)
@@ -486,7 +496,10 @@ def act_restore(req):
     items = manifest["items"]
     restored, skipped, kept = [], [], []
     for i, it in enumerate(items):
-        if os.path.lexists(it["src"]) or not os.path.lexists(it["dst"]):
+        # only move back what this tool could have written: dst inside the batch,
+        # src inside the cleaned project (guards against a damaged or edited manifest)
+        if (not _inside(it["dst"], batch_dir) or not _inside(it["src"], manifest["project"])
+                or os.path.lexists(it["src"]) or not os.path.lexists(it["dst"])):
             skipped.append(it["src"])
             kept.append(it)
             continue
@@ -535,7 +548,10 @@ ACTIONS = {"collect": collect, "list": act_list, "trash": act_trash,
 def main(argv):
     try:
         req = json.loads(argv[1]) if len(argv) > 1 else {}
-        result = ACTIONS[req.get("action", "collect")](req)
+        action = req.get("action", "collect")
+        if action not in ACTIONS:
+            raise ValueError("unknown action %r" % (action,))
+        result = ACTIONS[action](req)
     except Exception as e:
         result = {"error": "%s: %s" % (type(e).__name__, e)}
     sys.stdout.write(json.dumps(result))

@@ -60,7 +60,7 @@ def applescript(cmd, title):
         "    tell current window to create tab with default profile",
         "  end if",
         "  tell current session of current window",
-        "    set name to %s" % _as_str(title),
+        "    set name to %s" % _as_str(re.sub(r"[\r\n]", " ", title)),
         "    write text %s" % _as_str(cmd),
         "  end tell",
         "end tell",
