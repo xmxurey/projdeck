@@ -20,7 +20,7 @@ def test_title_priority_custom_over_ai_over_prompt(tmp_path, make_session):
     s = agent.parse_session(fp)
     assert s == {"id": "s1", "cwd": cwd, "title": "My name", "last_ts": 5000,
                  "size_kb": 0, "headless": False, "recent": ["first real prompt"],
-                 "last_reply": ""}
+                 "last_reply": "", "prompts": ["first real prompt"]}
 
 
 def test_title_falls_back_to_first_prompt_and_headless(tmp_path, make_session):
@@ -176,3 +176,18 @@ def test_tmux_sessions_parses_and_filters(monkeypatch):
 def test_unknown_action_names_it(capsys):
     agent.main(["agent.py", json.dumps({"action": "nope"})])
     assert json.loads(capsys.readouterr().out)["error"] == "ValueError: unknown action 'nope'"
+
+
+def test_prompts_collected_filtered_truncated_and_capped(tmp_path, make_session):
+    cwd = "/w/p"
+    tool_result = {"type": "user", "cwd": cwd, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
+    records = [user(cwd, "<command-name>/clear</command-name>"), tool_result,
+               user(cwd, "[Request interrupted by user]"), user(cwd, "fix  the\nnginx config"),
+               user(cwd, "z" * 400)]
+    records += [user(cwd, "p%d" % i) for i in range(250)]
+    s = agent.parse_session(make_session(tmp_path, cwd, "s9", records))
+    assert len(s["prompts"]) == 200 and s["prompts"][-1] == "p249" and s["prompts"][0] == "p50"
+    s2 = agent.parse_session(make_session(tmp_path, cwd, "s8", records[:5]))
+    assert s2["prompts"] == ["fix the nginx config", "z" * 300]
+    assert s2["recent"] == ["fix the nginx config", "z" * 120]

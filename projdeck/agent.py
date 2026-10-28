@@ -25,6 +25,7 @@ DEFAULT_PATTERNS = ["test_*.py", "*_backup*", "*.bak", "*.log", "*SUMMARY*.md",
 TEST_DIRS = {"tests", "test"}
 MAX_FILES = 5000
 SUSPICIOUS_CAP = 200
+PROMPTS_KEEP = 200  # per session, for `proj grep`
 GIT_TIMEOUT = 5
 TRASH_DIR = "~/.proj-trash"
 HOME_SKIP = {"Library", "Applications", "Movies", "Music", "Pictures", "Public",
@@ -229,8 +230,8 @@ def parse_session(fp):
     changes between versions, so every field is optional and bad lines are skipped."""
     sid = os.path.basename(fp)[:-len(".jsonl")]
     cwd = entry = custom = ai = first = None
-    # raw lines only: parsing every message of a big transcript would be slow
-    users, replies = deque(maxlen=12), deque(maxlen=6)
+    # only user lines are JSON-parsed; tool output and replies stay raw (they are the bulk)
+    prompts, replies = deque(maxlen=PROMPTS_KEEP), deque(maxlen=6)
     with open(fp, encoding="utf-8", errors="replace") as f:
         for line in f:
             if cwd is None:
@@ -254,10 +255,10 @@ def parse_session(fp):
                 elif d.get("type") == "ai-title" and d.get("aiTitle"):
                     ai = d["aiTitle"]
             elif '"type":"user"' in line and '"tool_result"' not in line:
-                users.append(line)
-                if first is None:
-                    found = _last_texts([line], "user", 1)
-                    if found:
+                found = _last_texts([line], "user", 1)
+                if found:
+                    prompts.append(one_line(found[0], 300))
+                    if first is None:
                         first = found[0]
             elif '"type":"assistant"' in line and '"type":"text"' in line:
                 replies.append(line)
@@ -267,8 +268,9 @@ def parse_session(fp):
     title = custom or ai or (one_line(first) if first else "") or "(untitled)"
     return {"id": sid, "cwd": cwd, "title": one_line(title), "last_ts": int(st.st_mtime),
             "size_kb": st.st_size // 1024, "headless": entry == "sdk-cli",
-            "recent": [one_line(t, 120) for t in _last_texts(users, "user", 3)],
-            "last_reply": one_line((_last_texts(replies, "assistant", 1) or [""])[0], 200)}
+            "recent": [p[:120] for p in list(prompts)[-3:]],
+            "last_reply": one_line((_last_texts(replies, "assistant", 1) or [""])[0], 200),
+            "prompts": list(prompts)}
 
 
 def scan_sessions(claude_dir):
