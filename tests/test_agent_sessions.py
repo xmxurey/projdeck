@@ -191,3 +191,11 @@ def test_prompts_collected_filtered_truncated_and_capped(tmp_path, make_session)
     s2 = agent.parse_session(make_session(tmp_path, cwd, "s8", records[:5]))
     assert s2["prompts"] == ["fix the nginx config", "z" * 300]
     assert s2["recent"] == ["fix the nginx config", "z" * 120]
+
+
+def test_compact_summary_is_not_a_prompt(tmp_path, make_session):
+    cwd = "/w/p"
+    summary = dict(user(cwd, "This session is being continued from a previous conversation."),
+                   isCompactSummary=True)
+    s = agent.parse_session(make_session(tmp_path, cwd, "s7", [summary, user(cwd, "real one")]))
+    assert s["prompts"] == ["real one"] and s["recent"] == ["real one"] and s["title"] == "real one"

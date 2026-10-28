@@ -166,6 +166,23 @@ def cmd_sessions(cfg, args):
     return 0
 
 
+def cmd_grep(cfg, args):
+    now = time.time()
+    rows = model.rows(fresh_caches(cfg, now), cfg, now)
+    items = model.all_prompts(rows)
+    if not items:
+        print("no prompts cached; run proj sync")
+        return 0
+    try:
+        host, path, sid = ui.pick_prompt(items, now, " ".join(args.query))
+    except ui.Cancelled:
+        return 0
+    r = model.find_row(rows, host, path)
+    s = next(s for s in r["sessions"] if s["id"] == sid)
+    launch(r, s["cwd"], s)
+    return 0
+
+
 def cmd_sync(cfg, args):
     status = sync.sync_all(cfg, args.hosts or None)
     if not args.quiet:
@@ -307,6 +324,15 @@ def cmd_preview(cfg, args):
     return 0
 
 
+def cmd_spreview(cfg, args):
+    now = time.time()
+    host, path, sid = (a.rstrip("\t") for a in (args.host, args.path, args.sid))
+    r = model.find_row(model.rows(sync.load_caches(cfg), cfg, now), host, path)
+    s = next((s for s in r["sessions"] if s["id"] == sid), None) if r else None
+    print(ui.session_preview_text(r, s, now, args.prompt.rstrip("\t")) if s else "(not in cache)")
+    return 0
+
+
 PREVIEW_BYTES = 8192
 
 
@@ -345,6 +371,8 @@ def parser():
     p = argparse.ArgumentParser(prog="proj", description="projects & Claude sessions across hosts")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("sessions", help="search all sessions by title and resume one")
+    s = sub.add_parser("grep", help="search your own prompts in all sessions and resume one")
+    s.add_argument("query", nargs="*")
     s = sub.add_parser("sync", help="refresh data from all (or given) hosts")
     s.add_argument("hosts", nargs="*")
     s.add_argument("--quiet", action="store_true")
@@ -360,6 +388,9 @@ def parser():
     s = sub.add_parser("_preview")
     s.add_argument("host")
     s.add_argument("path")
+    s = sub.add_parser("_spreview")
+    for a in ("host", "path", "sid", "prompt"):
+        s.add_argument(a)
     s = sub.add_parser("_fpreview")
     s.add_argument("host")
     s.add_argument("root")
@@ -367,9 +398,9 @@ def parser():
     return p
 
 
-COMMANDS = {None: cmd_browse, "sessions": cmd_sessions, "sync": cmd_sync, "report": cmd_report,
-            "clean": cmd_clean, "restore": cmd_restore, "trash": cmd_trash,
-            "_preview": cmd_preview, "_fpreview": cmd_fpreview}
+COMMANDS = {None: cmd_browse, "sessions": cmd_sessions, "grep": cmd_grep, "sync": cmd_sync,
+            "report": cmd_report, "clean": cmd_clean, "restore": cmd_restore, "trash": cmd_trash,
+            "_preview": cmd_preview, "_spreview": cmd_spreview, "_fpreview": cmd_fpreview}
 
 
 def main(argv=None):

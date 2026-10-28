@@ -32,6 +32,7 @@ Remote hosts need only `python3` and `git` (the agent is piped over ssh).
 |---|---|
 | `proj` | all projects; Enter open · ^R resume latest session · ^S pick session · ^X clean · ^U sync |
 | `proj sessions` | search all sessions by title, resume |
+| `proj grep [words]` | search everything you typed to Claude (all hosts), resume that session |
 | `proj sync [host…]` | refresh (auto in background after 30 min) |
 | `proj report` | markdown: unpushed, no upstream, junk, abandoned, deleted |
 | `proj clean HOST:PATH` | move untracked junk to `~/.proj-trash` (never ignored files) |

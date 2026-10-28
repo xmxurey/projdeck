@@ -254,7 +254,8 @@ def parse_session(fp):
                     custom = d["customTitle"]
                 elif d.get("type") == "ai-title" and d.get("aiTitle"):
                     ai = d["aiTitle"]
-            elif '"type":"user"' in line and '"tool_result"' not in line:
+            elif ('"type":"user"' in line and '"tool_result"' not in line
+                  and '"isCompactSummary":true' not in line):  # summary written on /compact
                 found = _last_texts([line], "user", 1)
                 if found:
                     prompts.append(one_line(found[0], 300))

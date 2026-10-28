@@ -366,3 +366,35 @@ def test_session_preview_text():
     assert lines[0] == "› fix the nginx config"
     assert "vm:/home/u/quant" in lines
     assert "left off · fix rebate · 1h ago" in lines and "  ⏺ done" in lines
+
+
+def test_cli_grep_resumes_chosen_session(tmp_path, monkeypatch, capsys, make_repo, make_session):
+    p1 = setup_env(tmp_path, monkeypatch, make_repo)
+    from tests.conftest import user
+    make_session(tmp_path / "isolated_home" / ".claude", p1, "sid1",
+                 [user(p1, "fix the nginx config")])
+    assert cli.main(["sync"]) == 0
+    seen = {}
+
+    def fake_pick(items, now, query=""):
+        seen["texts"], seen["query"] = [t for _, _, t in items], query
+        return "local", p1, "sid1"
+    monkeypatch.setattr(ui, "pick_prompt", fake_pick)
+    launched = []
+    monkeypatch.setattr(cli, "launch", lambda r, path, s=None: launched.append((path, s["id"])))
+    assert cli.main(["grep", "nginx", "config"]) == 0
+    assert seen == {"texts": ["fix the nginx config"], "query": "nginx config"}
+    assert launched == [(p1, "sid1")]
+    capsys.readouterr()
+    assert cli.main(["_spreview", "local\t", p1 + "\t", "sid1\t", "fix the nginx config\t"]) == 0
+    assert capsys.readouterr().out.startswith("› fix the nginx config\n")
+
+
+def test_cli_grep_without_prompts(tmp_path, monkeypatch, capsys, make_repo):
+    setup_env(tmp_path, monkeypatch, make_repo)
+
+    def no_fzf(*a, **k):
+        raise AssertionError("fzf must not run without prompts")
+    monkeypatch.setattr(ui, "run_fzf", no_fzf)
+    assert cli.main(["grep"]) == 0
+    assert "no prompts cached; run proj sync" in capsys.readouterr().out
