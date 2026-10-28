@@ -109,3 +109,13 @@ def test_report_no_upstream_and_suspicious_cap():
     assert "## Suspicious untracked files (15)" in md
     assert "`mac:/p19` 20 files: x0.log, x1.log, x2.log, x3.log, x4.log\n" in md
     assert "`mac:/p04`" not in md.split("## Suspicious")[1].split("## Abandoned")[0]
+
+
+def test_all_prompts_order_and_old_caches():
+    a = dict(sess("a", NOW - 10), prompts=["a1", "a2"])
+    b = dict(sess("b", NOW), prompts=["b1"])
+    old = sess("c", NOW + 5)  # cache written before prompts existed
+    caches = [{"host": "mac", "synced_at": NOW, "projects": [proj("/x", sessions=[a, b, old])]}]
+    rows = model.rows(caches, CFG, NOW)
+    assert [(s["id"], t) for _, s, t in model.all_prompts(rows)] == [
+        ("b", "b1"), ("a", "a1"), ("a", "a2")]

@@ -38,6 +38,10 @@ def preview_cmd():
     return "%s -m projdeck _preview {1} {2}" % shlex.quote(sys.executable)
 
 
+def spreview_cmd():
+    return "%s -m projdeck _spreview {1} {2} {3} {4}" % shlex.quote(sys.executable)
+
+
 def file_preview_cmd(host_name, root):
     return "%s -m projdeck _fpreview %s %s {1}" % (shlex.quote(sys.executable),
                                                    shlex.quote(host_name), shlex.quote(root))
@@ -87,9 +91,31 @@ def session_line(r, s, now):
     return SEP.join([r["host"], r["path"], s["id"], display])
 
 
+def prompt_line(r, s, text, now):
+    where = "%s:%s" % (r["host"], _name(r["path"]))
+    display = "%5s  %-28s │ %s" % (human_age(now - s["last_ts"]), where[:28], text)
+    return SEP.join([r["host"], r["path"], s["id"], text, display])
+
+
 def file_line(f):
     return SEP.join([f["path"], "%s %s  (%dK)" % ("⚑" if f["suspicious"] else " ", f["path"],
                                                    f["size"] // 1024)])
+
+
+def _left_off(s, now):
+    if not (s.get("recent") or s.get("last_reply")):
+        return []
+    out = ["", "left off · %s · %s ago" % (s["title"], human_age(now - s["last_ts"]))]
+    out.extend("  › " + p for p in s.get("recent") or [])
+    if s.get("last_reply"):
+        out.append("  ⏺ " + s["last_reply"])
+    return out
+
+
+def session_preview_text(r, s, now, prompt):
+    return "\n".join(["› " + prompt, "", "%s:%s" % (r["host"], r["path"]),
+                      "session: %s · %s ago" % (s["title"], human_age(now - s["last_ts"]))]
+                     + _left_off(s, now))
 
 
 def preview_text(r, now):
@@ -110,11 +136,8 @@ def preview_text(r, now):
     if r.get("live_tmux"):
         out.append("▶ live tmux: %s" % ", ".join(r["live_tmux"]))
     s = latest_session(r)
-    if s and (s.get("recent") or s.get("last_reply")):
-        out.extend(["", "left off · %s · %s ago" % (s["title"], human_age(now - s["last_ts"]))])
-        out.extend("  › " + p for p in s.get("recent") or [])
-        if s.get("last_reply"):
-            out.append("  ⏺ " + s["last_reply"])
+    if s:
+        out.extend(_left_off(s, now))
     if r["suspicious"]:
         out.append("")
         out.append("suspicious files (%d):" % n_suspicious(r))
@@ -172,6 +195,20 @@ def pick_session(pairs, now):
     _, sel = run_fzf(lines, ["--delimiter=\t", "--with-nth=4..", "--tiebreak=index",
                              "--header=Enter: resume in a new tab",
                              "--preview=" + preview_cmd(), "--preview-window=right,40%,wrap"])
+    if not sel:
+        raise Cancelled()
+    host, path, sid, _ = sel[0].split(SEP, 3)
+    return host, path, sid
+
+
+def pick_prompt(items, now, query=""):
+    lines = [prompt_line(r, s, t, now) for r, s, t in items]
+    args = ["--delimiter=\t", "--with-nth=5..", "--exact", "--tiebreak=index",
+            "--header=Enter: resume in a new tab · 'word: fuzzy",
+            "--preview=" + spreview_cmd(), "--preview-window=right,45%,wrap"]
+    if query:
+        args.append("--query=" + query)
+    _, sel = run_fzf(lines, args)
     if not sel:
         raise Cancelled()
     host, path, sid, _ = sel[0].split(SEP, 3)

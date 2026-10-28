@@ -337,3 +337,32 @@ def test_usage_log_and_report_section(tmp_path, monkeypatch, capsys, make_repo):
     assert cli.main(["report"]) == 0
     out = capsys.readouterr().out
     assert "## Your usage, last 14 days" in out and "open 1 · resume 1" in out
+
+
+def test_prompt_line_and_pick_prompt_args(monkeypatch):
+    r = row()
+    s = r["sessions"][0]
+    line = ui.prompt_line(r, s, "fix the nginx config", NOW)
+    host, path, sid, text, display = line.split("\t")
+    assert (host, path, sid, text) == ("vm", "/home/u/quant", "s1", "fix the nginx config")
+    assert display.endswith("vm:quant                     │ fix the nginx config")
+    captured = {}
+
+    def fake_fzf(lines, args, expect=()):
+        captured["args"] = args
+        return "", [lines[0]]
+    monkeypatch.setattr(ui, "run_fzf", fake_fzf)
+    assert ui.pick_prompt([(r, s, "fix the nginx config")], NOW, "nginx") == ("vm", "/home/u/quant", "s1")
+    assert "--exact" in captured["args"] and "--query=nginx" in captured["args"]
+    assert "--with-nth=5.." in captured["args"]
+    ui.pick_prompt([(r, s, "x")], NOW)
+    assert not any(a.startswith("--query") for a in captured["args"])
+
+
+def test_session_preview_text():
+    s = dict(row()["sessions"][0], recent=["add tests"], last_reply="done")
+    text = ui.session_preview_text(row(sessions=[s]), s, NOW, "fix the nginx config")
+    lines = text.splitlines()
+    assert lines[0] == "› fix the nginx config"
+    assert "vm:/home/u/quant" in lines
+    assert "left off · fix rebate · 1h ago" in lines and "  ⏺ done" in lines

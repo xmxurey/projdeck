@@ -59,6 +59,11 @@ def all_sessions(rows_):
     return pairs
 
 
+def all_prompts(rows_):
+    """(row, session, prompt) for every cached prompt; newest session first."""
+    return [(r, s, t) for r, s in all_sessions(rows_) for t in s.get("prompts") or []]
+
+
 def latest_session(row):
     sessions = row["sessions"]
     for s in sessions:
