@@ -1,3 +1,6 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+# process-core /run 台账只留在本机，不进仓库（含机器名、地址等）
+docs/dev/runs/
+.worktrees/

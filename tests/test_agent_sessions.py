@@ -39,14 +39,16 @@ def test_owner_longest_prefix():
     assert agent.owner("/a/bc", ["/a/b"]) is None
 
 
-def test_collect_groups_sessions(tmp_path, make_repo, make_session):
+def test_collect_groups_sessions(tmp_path, make_repo, make_session, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     root = tmp_path / "home"
     repo = make_repo(root / "proj", {"a.py": "1"})
     write(os.path.join(repo, "debug.log"))
     claude = tmp_path / "claude"
     make_session(claude, repo + "/sub", "in-repo", [user(repo + "/sub", "hi")], mtime=100)
     make_session(claude, repo, "newer", [user(repo, "yo")], mtime=200)
-    make_session(claude, "/gone/dir", "orphan", [user("/gone/dir", "old")])
+    gone_dir = str(tmp_path / "gone" / "dir")
+    make_session(claude, gone_dir, "orphan", [user(gone_dir, "old")])
     out = agent.collect({"host": "h1", "roots": [str(root)], "scan_depth": 2,
                          "claude_dir": str(claude)})
     assert out["schema"] == 1 and out["host"] == "h1"
@@ -55,11 +57,13 @@ def test_collect_groups_sessions(tmp_path, make_repo, make_session):
     assert [s["id"] for s in p["sessions"]] == ["newer", "in-repo"]
     assert p["suspicious"] == ["debug.log"]
     assert p["git"]["untracked"] == 1 and p["errors"] == []
-    gone = by_path["/gone/dir"]
+    gone = by_path[gone_dir]
     assert gone["exists"] is False and gone["sessions"][0]["id"] == "orphan"
 
 
-def test_collect_session_outside_roots_uses_repo_toplevel(tmp_path, make_repo, make_session):
+def test_collect_session_outside_roots_uses_repo_toplevel(tmp_path, make_repo, make_session,
+                                                          monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     other = make_repo(tmp_path / "elsewhere")
     claude = tmp_path / "claude"
     make_session(claude, other + "/deep", "s", [user(other + "/deep", "hi")])
@@ -84,6 +88,7 @@ def test_main_reports_errors_as_json(capsys):
 
 
 def test_collect_orphans_not_absorbed_by_earlier_orphan(tmp_path, make_session, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     home = tmp_path / "h"
     home.mkdir()
     claude = tmp_path / "claude"
@@ -94,6 +99,46 @@ def test_collect_orphans_not_absorbed_by_earlier_orphan(tmp_path, make_session, 
     assert sorted(by) == [str(home), str(home) + "/gone"]
     assert by[str(home) + "/gone"]["exists"] is False
     assert [s["id"] for s in by[str(home) + "/gone"]["sessions"]] == ["s2"]
+
+
+def test_collect_drops_sessions_outside_home(tmp_path, make_repo, make_session, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dev"
+    repo = make_repo(root / "proj")
+    claude = tmp_path / "claude"
+    make_session(claude, repo, "kept", [user(repo, "hi")])
+    scratch = make_repo(tmp_path / "tmp" / "scratch")
+    make_session(claude, scratch, "temp", [user(scratch, "x")])
+    make_session(claude, "/tmp/gone", "temp2", [user("/tmp/gone", "y")])
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(root)], "claude_dir": str(claude)})
+    assert [p["path"] for p in out["projects"]] == [repo]
+    assert [s["id"] for s in out["projects"][0]["sessions"]] == ["kept"]
+
+
+def test_collect_keeps_sessions_in_configured_roots_outside_home(tmp_path, make_repo,
+                                                               make_session, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = make_repo(tmp_path / "srv" / "proj")
+    claude = tmp_path / "claude"
+    make_session(claude, repo, "s", [user(repo, "hi")])
+    out = agent.collect({"roots": [str(tmp_path / "srv")], "claude_dir": str(claude)})
+    assert [s["id"] for s in out["projects"][0]["sessions"]] == ["s"]
+
+
+def test_collect_reports_home_and_follows_symlinked_cwd(tmp_path, make_repo, make_session,
+                                                        monkeypatch):
+    home = tmp_path / "home"
+    repo = make_repo(home / "daily" / "digest")
+    os.symlink(repo, str(home / "digest"))
+    claude = tmp_path / "claude"
+    link = str(home / "digest")
+    make_session(claude, link, "s", [user(link, "hi")])
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(home)], "claude_dir": str(claude)})
+    assert out["home"] == str(home)
+    by = {p["path"]: p for p in out["projects"]}
+    assert [s["id"] for s in by[repo]["sessions"]] == ["s"]
 
 
 def test_discover_skips_home_folders(tmp_path, make_repo, monkeypatch):
@@ -199,3 +244,96 @@ def test_compact_summary_is_not_a_prompt(tmp_path, make_session):
                    isCompactSummary=True)
     s = agent.parse_session(make_session(tmp_path, cwd, "s7", [summary, user(cwd, "real one")]))
     assert s["prompts"] == ["real one"] and s["recent"] == ["real one"] and s["title"] == "real one"
+
+
+REGISTRY = """# 本机项目登记
+
+标签四选一：**Quant** · **Invest**
+
+## Quant
+
+| 项目 | 状态 |
+|---|---|
+| `quant/` | 在跑 |
+| `games/sell-high/` | 搁置 |
+
+## Invest
+
+| 项目 | 状态 |
+|---|---|
+| `fin/` | 活跃 |
+| 没有反引号 | x |
+"""
+
+
+def test_read_registry_maps_paths_to_tags(tmp_path):
+    write(tmp_path / "PROJECTS.md", REGISTRY)
+    tags, order, flags = agent.read_registry(str(tmp_path))
+    h = str(tmp_path)
+    assert tags == {h + "/quant": "Quant", h + "/games/sell-high": "Quant", h + "/fin": "Invest"}
+    assert order == ["Quant", "Invest"] and flags == set()
+    assert agent.read_registry(str(tmp_path / "none")) == ({}, [], set())
+
+
+def test_collect_attaches_tags(tmp_path, make_repo, make_session, monkeypatch):
+    home = tmp_path / "home"
+    q = make_repo(home / "quant")
+    other = make_repo(home / "other")
+    write(home / "PROJECTS.md", REGISTRY)
+    claude = tmp_path / "c"
+    make_session(claude, other, "s", [user(other, "hi")])
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(home)], "claude_dir": str(claude)})
+    by = {p["path"]: p for p in out["projects"]}
+    assert by[q]["tag"] == "Quant" and by[other]["tag"] is None
+    assert out["tags"] == ["Quant", "Invest"]
+
+
+def test_collect_drops_headless_scheduled_sessions(tmp_path, make_repo, make_session,
+                                                   monkeypatch):
+    home = tmp_path / "home"
+    repo = make_repo(home / "daily" / "digest")
+    cron_only = str(home / "digest")
+    claude = tmp_path / "claude"
+    make_session(claude, repo, "me", [user(repo, "hi")])
+    make_session(claude, repo, "cron", [user(repo, "gen", entry="sdk-cli")])
+    make_session(claude, cron_only, "cron2", [user(cron_only, "gen", entry="sdk-cli")])
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(home / "daily")], "claude_dir": str(claude)})
+    assert [p["path"] for p in out["projects"]] == [repo]
+    assert [s["id"] for s in out["projects"][0]["sessions"]] == ["me"]
+
+
+def test_collect_with_registry_lists_only_registered_or_worked_on(tmp_path, make_repo,
+                                                                  make_session, monkeypatch):
+    home = tmp_path / "home"
+    q = make_repo(home / "quant")
+    make_repo(home / "uploads")
+    worked = make_repo(home / "scratchpad")
+    write(home / "PROJECTS.md", REGISTRY)
+    claude = tmp_path / "claude"
+    make_session(claude, worked, "s", [user(worked, "hi")])
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(home)], "claude_dir": str(claude)})
+    assert sorted(p["path"] for p in out["projects"]) == [q, worked]
+
+
+def test_collect_without_registry_lists_everything(tmp_path, make_repo, monkeypatch):
+    home = tmp_path / "home"
+    make_repo(home / "a")
+    make_repo(home / "uploads")
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(home)], "claude_dir": str(tmp_path / "c")})
+    assert len(out["projects"]) == 2
+
+
+def test_registry_flag_marks_project(tmp_path, make_repo, monkeypatch):
+    home = tmp_path / "home"
+    a = make_repo(home / "a")
+    b = make_repo(home / "b")
+    write(home / "PROJECTS.md", "## Quant\n\n| x | y |\n|---|---|\n| 🚩 `a/` | 1 |\n| `b/` | 2 |\n")
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(home)], "claude_dir": str(tmp_path / "c")})
+    by = {p["path"]: p for p in out["projects"]}
+    assert by[a]["tag"] == by[b]["tag"] == "Quant"
+    assert by[a]["flag"] is True and by[b]["flag"] is False

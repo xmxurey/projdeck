@@ -2,7 +2,7 @@ import os
 import time
 
 from projdeck import agent
-from tests.conftest import run_git, write
+from tests.conftest import run_git, user, write
 
 
 def test_parse_status_branch_ahead_dirty_untracked():
@@ -94,3 +94,27 @@ def test_git_timeout_and_missing_binary_become_runtime_errors(tmp_path, monkeypa
         monkeypatch.setattr(agent.subprocess, "run", boom(exc))
         with pytest.raises(RuntimeError, match="git"):
             agent.git(str(tmp_path), "status")
+
+
+def test_parent_dir_activity_ignores_nested_projects(tmp_path, make_repo, make_session,
+                                                     monkeypatch):
+    home = tmp_path / "home"
+    dev = str(home / "dev")
+    make_session(tmp_path / "c", dev, "s", [user(dev, "hi")])
+    write(home / "dev" / "notes.txt")
+    os.utime(str(home / "dev" / "notes.txt"), (1000, 1000))
+    child = make_repo(home / "dev" / "child")
+    os.utime(os.path.join(child, "README.md"), (9000, 9000))
+    monkeypatch.setenv("HOME", str(home))
+    out = agent.collect({"roots": [str(home)], "claude_dir": str(tmp_path / "c")})
+    by = {p["path"]: p for p in out["projects"]}
+    assert by[str(home / "dev")]["last_mtime"] == 1000
+    assert by[child]["last_mtime"] == 9000
+
+
+def test_empty_dir_activity_falls_back_to_dir_mtime(tmp_path):
+    d = tmp_path / "empty"
+    d.mkdir()
+    os.utime(str(d), (5000, 5000))
+    p = agent.build_project(str(d), [])
+    assert p["last_mtime"] == 5000

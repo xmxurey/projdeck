@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-from projdeck import config, model, opener, report, sync, ui
+from projdeck import agent, board, config, model, opener, report, serve, sync, ui
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,22 +32,92 @@ def _ask(prompt):
 
 def print_sync(status):
     for s in status:
-        print("%s: %s" % (s["host"], "ok" if s["ok"] else "FAILED (%s)" % s["error"]))
+        print("%s: %s" % (s["host"], "ok" if s["ok"] else "FAILED (%s)" % ui._one_line(s["error"])))
 
 
-def background_sync():
-    marker = os.path.join(sync.cache_dir(), ".syncing")
+def _spawn_detached(marker, args, now=None):
+    """Start `proj <args>` detached unless a sync holding `marker` is already running.
+    Returns None, or a notice when the process could not be started."""
+    problems = []
+    if not sync.claim_marker(marker, now, problems):
+        return "background sync not started: %s" % problems[0] if problems else None
     try:
-        if time.time() - os.path.getmtime(marker) < 300:
-            return
-    except OSError:
-        pass
-    os.makedirs(sync.cache_dir(), exist_ok=True)
-    with open(marker, "w"):
-        pass
-    subprocess.Popen([sys.executable, "-m", "projdeck", "sync", "--quiet"],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+        subprocess.Popen([sys.executable, "-m", "projdeck"] + args,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        sync.release_marker(marker)
+        return "could not start background sync: %s" % e
+    return None
+
+
+_notices = []  # problems found while refreshing, shown in the fzf header by cmd_browse
+
+
+def _note(text):
+    _notices.append(ui._one_line(text))
+
+
+def take_notices():
+    out = list(_notices)
+    del _notices[:]
+    return out
+
+
+def background_sync(now=None):
+    return _spawn_detached(sync.SYNC_MARKER, ["sync", "--quiet"], now)
+
+
+def background_live_sync(now=None):
+    if sync.live_sync_running(now):
+        return None
+    return _spawn_detached(sync.LIVE_MARKER, ["sync", "--live", "--quiet"], now)
+
+
+LOCAL_LIVE_SECONDS = 30
+REMOTE_LIVE_SECONDS = 120
+
+
+def fresh_lives(cfg, now):
+    """Live caches for the terminal. The local host is recomputed in this process when its
+    cache is older than 30 s; remote hosts older than 120 s start a background sync and
+    keep what is cached. Never waits on ssh."""
+    remote_due = False
+    for h in cfg["hosts"]:
+        c = sync.read_live(h["name"]) or {}
+        age = now - (c.get("collected_at") or c.get("synced_at") or 0)
+        if h.get("local"):
+            if age > LOCAL_LIVE_SECONDS:
+                sync.sync_live(h, cfg, now)
+        elif age > REMOTE_LIVE_SECONDS:
+            remote_due = True
+    if remote_due:
+        problem = background_live_sync(now)
+        if problem:
+            _note(problem)
+    return sync.load_lives(cfg)
+
+
+def dashboard_url(cfg):
+    """Configured dashboard_url, else this node's Tailscale IP with the serve port, else None."""
+    if cfg.get("dashboard_url"):
+        return cfg["dashboard_url"]
+    me = serve.tailscale_self()
+    if me and me.get("ip"):
+        return "http://%s:%d" % (me["ip"], serve.resolve_port(cfg, None))
+    return None
+
+
+def open_dashboard(cfg):
+    """^V: open the dashboard in a browser; returns the notice to show."""
+    url = dashboard_url(cfg)
+    if not url:
+        return "set dashboard_url in ~/.config/proj/config.json"
+    if opener.open_url(url):
+        return "opened %s" % ui._one_line(url)
+    if not url.startswith(("http://", "https://")):
+        return "dashboard_url 不是 http(s) 地址，无法打开：%s" % ui._one_line(url)
+    return "看板：%s（在 Mac 浏览器里打开）" % ui._one_line(url)
 
 
 def fresh_caches(cfg, now):
@@ -56,7 +126,9 @@ def fresh_caches(cfg, now):
         print("first sync…", file=sys.stderr)
         print_sync(sync.sync_all(cfg))
     elif now - oldest > cfg["auto_sync_minutes"] * 60:
-        background_sync()
+        problem = background_sync(now)
+        if problem:
+            _note(problem)
     return sync.load_caches(cfg)
 
 
@@ -89,7 +161,7 @@ def read_events(since):
 
 def launch(row, path, session=None):
     new_tab = opener.has_iterm()
-    inner = opener.resume_inner(session["id"]) if session else None
+    inner = opener.resume_inner(session["id"]) if session else opener.PICKER
     cmd = opener.build_command(row, path, inner, new_tab=new_tab,
                                session_id=session["id"] if session else None)
     title = "%s:%s" % (row["host"], os.path.basename(path.rstrip("/")))
@@ -97,41 +169,127 @@ def launch(row, path, session=None):
     return opener.open_command(cmd, title, iterm=new_tab)  # "iterm" or "inline"
 
 
+def open_project(rows, r):
+    """Enter on a project. A local zellij host joins the project's live session (looked
+    up now, not from the cache); without one, outside zellij, it creates the project's
+    proj-<name> session, and where zellij is unusable the picker runs here. Returns
+    (outcome, notice): "iterm"/"tab" keep proj open, "inline" means it ran here, None
+    opened nothing."""
+    name = "%s:%s" % (r["host"], os.path.basename(r["path"].rstrip("/")))
+    if sync.zellij_in_scope(r):
+        paths = [x["path"] for x in rows if x["host"] == r["host"]]
+        live = agent.zellij_by_project(paths).get(r["path"], [])
+        if len(live) > 1:
+            try:
+                live = [ui.pick_live(live, name)]
+            except ui.Cancelled:
+                return None, None
+        here = os.environ.get("ZELLIJ_SESSION_NAME")
+        if live:
+            s = live[0]["name"]
+            if here:  # zellij cannot switch a client to another session from the CLI
+                where = "this session" if s == here else "zellij session %s" % s
+                return None, "%s is already open in %s: press Ctrl-o w to switch" % (name, where)
+            log_event("open", r["host"], r["path"], attach=s)
+            return opener.open_command(opener.zellij_attach(s, r["path"]), name, iterm=False), None
+        if here:
+            log_event("open", r["host"], r["path"])
+            opener.zellij_new_tab(r["path"], name)
+            return "tab", "opened %s in a new zellij tab" % name
+        if not os.environ.get("ZELLIJ"):
+            return create_session(r, name), None
+    return launch(r, r["path"]), None
+
+
+def create_session(r, title):
+    """Outside zellij, no live session of the project: start proj-<project name> running
+    the picker. An exited session of that exact name is deleted first; any other session,
+    exited or not, is never touched. Falls back to launch() when zellij is unusable."""
+    sessions = agent.zellij_session_list()
+    if sessions is None:
+        return launch(r, r["path"])
+    name = opener.proj_session_name(ui.project_name(r))
+    state = opener.session_state(sessions, name)
+    if state == "live":  # proj's own session whose processes are not in this project
+        log_event("open", r["host"], r["path"], attach=name)
+        return opener.open_command(opener.zellij_attach(name, r["path"]), title, iterm=False)
+    layout_dir = os.path.join(sync.cache_dir(), "zellij")
+    try:
+        cmd = opener.zellij_new_session(r["path"], name, layout_dir, state == "exited")
+    except (OSError, ValueError) as e:
+        print("cannot write the zellij layout, running here instead: %s" % ui._one_line(e),
+              file=sys.stderr)
+        return launch(r, r["path"])
+    extra = {"replaced_exited": True} if state == "exited" else {}
+    log_event("open", r["host"], r["path"], created=name, **extra)
+    return opener.open_command(cmd, title, iterm=False)
+
+
 def cmd_browse(cfg, args):
     """Project overview. Stays open after opening a tab in iTerm2, so you can switch
     between tasks; without iTerm2 the command runs here and proj exits."""
-    now = time.time()
-    caches = fresh_caches(cfg, now)
-    notice = last = None
+    take_notices()
+    caches = fresh_caches(cfg, time.time())
+    notice, last = "; ".join(cfg.get("warnings") or []) or None, None
     while True:
+        now = time.time()
         rows = model.rows(caches, cfg, now)
         if not rows:
             print("no projects found; check roots in %s" % config.config_path())
             return 1
         try:
-            key, host, path = ui.pick_project(rows, now, notice, last)
+            bd = board.build(caches, fresh_lives(cfg, now), cfg, now)
+            notice = "; ".join(x for x in [notice] + take_notices() if x) or None
+            key, host, path = ui.pick_project(rows, now, notice, last, board=bd)
         except ui.Cancelled:
             return 0
         notice, last = None, (host, path)
         if key == "ctrl-u":
-            notice = "sync: " + ", ".join("%s %s" % (s["host"], "ok" if s["ok"] else "FAILED")
-                                          for s in sync.sync_all(cfg))
-            caches, now = sync.load_caches(cfg), time.time()
+            notice = "sync: " + ", ".join(
+                "%s %s" % (s["host"], "ok" if s["ok"] else "FAILED" + (
+                    " (live)" if (s["error"] or "").startswith("live:") else ""))
+                for s in sync.sync_all(cfg))
+            caches = sync.load_caches(cfg)
             continue
+        if key == "ctrl-l":
+            try:
+                last = ui.pick_backlog(rows, now)
+            except ui.Cancelled:
+                pass
+            continue
+        if key == "ctrl-v":
+            notice = open_dashboard(cfg)
+            continue
+        if key and key not in ui.PROJECT_KEYS:
+            continue  # unbound keys go back to the list
+        session = None
+        if key == "ctrl-f":  # works on host header lines too: it searches every host
+            items = model.all_prompts(rows)
+            if not items:
+                notice = "no prompts cached; press ^U to sync"
+                continue
+            try:
+                host, path, sid = ui.pick_prompt(items, now)
+            except ui.Cancelled:
+                continue
+            last = (host, path)
         r = model.find_row(rows, host, path)
-        if r is None:  # a host header line
-            continue
+        if r is None:
+            if host and path:  # only in the live data: no row to act on
+                notice = "该项目还没采集，按 ^U 同步"
+            continue  # (a host header line has no path)
         name = "%s:%s" % (host, os.path.basename(path.rstrip("/")))
         if key == "ctrl-x":
             notice = clean(cfg, host, path)
             continue
-        session = None
-        if key == "ctrl-r":
+        if key == "ctrl-f":
+            session = next(s for s in r["sessions"] if s["id"] == sid)
+        elif key == "ctrl-r":
             session = model.latest_session(r)
             if session is None:
                 notice = "no sessions for %s" % name
                 continue
-        elif key == "ctrl-s":
+        elif key == "ctrl-y":
             if not r["sessions"]:
                 notice = "no sessions for %s" % name
                 continue
@@ -143,15 +301,22 @@ def cmd_browse(cfg, args):
         elif not r["exists"]:
             notice = "directory no longer exists: %s" % path
             continue
-        if launch(r, session["cwd"] if session else path, session) != "iterm":
+        if session:
+            outcome, msg = launch(r, session["cwd"], session), None
+        else:
+            outcome, msg = open_project(rows, r)
+        if outcome == "inline":
             return 0
-        notice = "opened %s%s in a new iTerm2 tab" % (name, " (resume)" if session else "")
-        caches, now = sync.load_caches(cfg), time.time()
+        notice = msg or ("opened %s%s in a new iTerm2 tab" % (name, " (resume)" if session else "")
+                         if outcome == "iterm" else None)
+        caches = sync.load_caches(cfg)
 
 
 def cmd_sessions(cfg, args):
     now = time.time()
     rows = model.rows(fresh_caches(cfg, now), cfg, now)
+    for problem in take_notices():
+        print(problem, file=sys.stderr)
     pairs = model.all_sessions(rows)
     if not pairs:
         print("no sessions found")
@@ -169,6 +334,8 @@ def cmd_sessions(cfg, args):
 def cmd_grep(cfg, args):
     now = time.time()
     rows = model.rows(fresh_caches(cfg, now), cfg, now)
+    for problem in take_notices():
+        print(problem, file=sys.stderr)
     items = model.all_prompts(rows)
     if not items:
         print("no prompts cached; run proj sync")
@@ -184,22 +351,25 @@ def cmd_grep(cfg, args):
 
 
 def cmd_sync(cfg, args):
-    status = sync.sync_all(cfg, args.hosts or None)
+    status = sync.sync_all(cfg, args.hosts or None, live_only=args.live)
     if not args.quiet:
         print_sync(status)
-    try:
-        os.remove(os.path.join(sync.cache_dir(), ".syncing"))
-    except OSError:
-        pass
+    sync.release_marker(sync.LIVE_MARKER if args.live else sync.SYNC_MARKER)
     return 0 if all(s["ok"] for s in status) else 1
 
 
 def cmd_report(cfg, args):
     now = time.time()
     caches = sync.load_caches(cfg)
+    lives = sync.load_lives(cfg)
+    bd = board.build(caches, lives, cfg, now)  # cache only: no fresh_lives, no zellij
     sys.stdout.write(report.render(model.rows(caches, cfg, now), caches, now,
-                                   events=read_events(now - report.USAGE_DAYS * 86400)))
+                                   events=read_events(now - report.USAGE_DAYS * 86400), board=bd, lives=lives, cfg=cfg))
     return 0
+
+
+def cmd_serve(cfg, args):
+    return serve.serve(cfg, args.bind, args.port)
 
 
 def clean(cfg, host_name, path):
@@ -207,7 +377,7 @@ def clean(cfg, host_name, path):
     listing = sync.run_agent(host, {"action": "list", "path": path,
                                     "patterns": cfg["suspicious_patterns"]}, cfg["ssh_timeout"])
     if not listing["files"]:
-        msg = "no untracked files in %s:%s" % (host_name, path)
+        msg = "no untracked files in %s:%s" % (host_name, ui._one_line(path))
         print(msg)
         return msg
     try:
@@ -216,7 +386,7 @@ def clean(cfg, host_name, path):
         return "clean cancelled"
     if not chosen:
         return "clean: nothing selected"
-    print("\n".join("  " + c for c in chosen))
+    print("\n".join("  " + ui._one_line(c) for c in chosen))
     if _ask("move %d file(s) to %s on %s? [y/N] " % (len(chosen), cfg["trash_dir"], host_name)) \
             .strip().lower() != "y":
         return "clean cancelled"
@@ -224,11 +394,11 @@ def clean(cfg, host_name, path):
                                 "trash_dir": cfg["trash_dir"]}, cfg["ssh_timeout"])
     log_event("clean", host_name, path, moved=len(res["moved"]))
     msg = "moved %d, skipped %d%s" % (len(res["moved"]), len(res["skipped"]),
-                                      ("  (batch %s; undo: proj restore)" % res["batch"])
+                                      ("  (batch %s; undo: proj restore)" % ui._one_line(res["batch"]))
                                       if res["batch"] else "")
     print(msg)
     for s in res["skipped"]:
-        print("  skipped (no longer untracked or unsafe): %s" % s)
+        print("  skipped (no longer untracked or unsafe): %s" % ui._one_line(s))
     return msg
 
 
@@ -248,15 +418,23 @@ def _all_batches(cfg, host_name):
             res = sync.run_agent(h, {"action": "batches", "trash_dir": cfg["trash_dir"]},
                                  cfg["ssh_timeout"])
         except sync.AgentError as e:
-            print("%s: %s" % (h["name"], e), file=sys.stderr)
+            print("%s: %s" % (h["name"], ui._one_line(e)), file=sys.stderr)
             continue
         out.extend((h, b) for b in res["batches"])
     return out
 
 
+def _batch_text(h, b):
+    """What a batch looks like on screen: every external part cleaned."""
+    return "%s  %s  %s  %d file(s)  %s" % (ui._one_line(h["name"]), ui._one_line(b["id"]),
+                                           ui.fmt_time(b["created"]), b["count"],
+                                           ui._one_line(b["project"]))
+
+
 def _batch_line(h, b):
-    return "%s\t%s\t%s  %d file(s)  %s" % (h["name"], b["id"], ui.fmt_time(b["created"]),
-                                           b["count"], b["project"])
+    """Picker line: host and batch id exactly as the agent gave them (restore sends the id
+    back, and cleaning would change a name with double spaces or ESC), then the shown text."""
+    return "%s\t%s\t%s" % (h["name"], b["id"], _batch_text(h, b))
 
 
 def cmd_restore(cfg, args):
@@ -265,7 +443,8 @@ def cmd_restore(cfg, args):
         print("trash is empty")
         return 0
     try:
-        line = ui.pick_line([_batch_line(h, b) for h, b in batches], "pick a batch to restore")
+        line = ui.pick_line([_batch_line(h, b) for h, b in batches], "pick a batch to restore",
+                            shown_fields="3..")
     except ui.Cancelled:
         return 0
     host_name, batch_id = line.split("\t")[:2]
@@ -275,7 +454,7 @@ def cmd_restore(cfg, args):
     log_event("restore", host_name, batch_id, restored=len(res["restored"]))
     print("restored %d, skipped %d" % (len(res["restored"]), len(res["skipped"])))
     for s in res["skipped"]:
-        print("  skipped (path exists or trash copy missing): %s" % s)
+        print("  skipped (path exists or trash copy missing): %s" % ui._one_line(s))
     return 0
 
 
@@ -291,7 +470,7 @@ def cmd_trash(cfg, args):
     batches = _all_batches(cfg, args.host)
     if not args.purge:
         for h, b in batches:
-            print(_batch_line(h, b))
+            print(_batch_text(h, b))
         return 0
     cutoff = time.time() - _days(args.older) * 86400
     old = [(h, b) for h, b in batches if b["created"] < cutoff]
@@ -299,7 +478,7 @@ def cmd_trash(cfg, args):
         print("nothing older than %s" % args.older)
         return 0
     for h, b in old:
-        print(_batch_line(h, b))
+        print(_batch_text(h, b))
     print("%d batch(es) will be permanently deleted." % len(old))
     if _ask("type yes to confirm: ").strip() != "yes":
         return 0
@@ -319,8 +498,22 @@ def cmd_preview(cfg, args):
     if not path:
         print(ui.host_preview_text(host, caches, model.rows(caches, cfg, now), now))
         return 0
+    rows = model.rows(caches, cfg, now)
+    r = model.find_row(rows, host, path)
+    fresh, stale = ui._speakers(board.build(caches, sync.load_lives(cfg), cfg, now))
+    live = fresh.get((host, path)) or stale.get((host, path))
+    if r is None and live:
+        r = ui._minimal_row(host, path, live, now)
+    print(ui.preview_text(r, now, live) if r else "(not in cache)")
+    return 0
+
+
+def cmd_bpreview(cfg, args):
+    now = time.time()
+    host, path, idx = (a.rstrip("\t") for a in (args.host, args.path, args.idx))
+    caches = sync.load_caches(cfg)
     r = model.find_row(model.rows(caches, cfg, now), host, path)
-    print(ui.preview_text(r, now) if r else "(not in cache)")
+    print(ui.backlog_preview_text(r, idx) if r else "(not in cache)")
     return 0
 
 
@@ -363,7 +556,7 @@ def cmd_fpreview(cfg, args):
         print(file_preview(config.host_by_name(cfg, args.host),
                            os.path.join(args.root, args.rel.rstrip("\t"))), end="")
     except (OSError, subprocess.SubprocessError) as e:
-        print("(cannot preview: %s)" % e)
+        print("(cannot preview: %s)" % ui._one_line(e))
     return 0
 
 
@@ -375,8 +568,12 @@ def parser():
     s.add_argument("query", nargs="*")
     s = sub.add_parser("sync", help="refresh data from all (or given) hosts")
     s.add_argument("hosts", nargs="*")
+    s.add_argument("--live", action="store_true", help="refresh only the live layer")
     s.add_argument("--quiet", action="store_true")
     sub.add_parser("report", help="markdown overview of what needs attention")
+    s = sub.add_parser("serve", help="read-only web dashboard on the Tailscale address")
+    s.add_argument("--bind", metavar="ADDR", help="Tailscale (100.64.0.0/10) or loopback IP")
+    s.add_argument("--port", type=int, metavar="N", help="default: serve.port, else 8787")
     s = sub.add_parser("clean", help="move untracked junk to the trash (reversible)")
     s.add_argument("target", metavar="HOST:PATH")
     s = sub.add_parser("restore", help="restore a trash batch")
@@ -388,6 +585,10 @@ def parser():
     s = sub.add_parser("_preview")
     s.add_argument("host")
     s.add_argument("path")
+    s = sub.add_parser("_bpreview")
+    s.add_argument("host")
+    s.add_argument("path")
+    s.add_argument("idx", nargs="?", default="")
     s = sub.add_parser("_spreview")
     for a in ("host", "path", "sid", "prompt"):
         s.add_argument(a)
@@ -399,8 +600,8 @@ def parser():
 
 
 COMMANDS = {None: cmd_browse, "sessions": cmd_sessions, "grep": cmd_grep, "sync": cmd_sync,
-            "report": cmd_report, "clean": cmd_clean, "restore": cmd_restore, "trash": cmd_trash,
-            "_preview": cmd_preview, "_spreview": cmd_spreview, "_fpreview": cmd_fpreview}
+            "report": cmd_report, "serve": cmd_serve, "clean": cmd_clean, "restore": cmd_restore,
+            "trash": cmd_trash, "_preview": cmd_preview, "_bpreview": cmd_bpreview, "_spreview": cmd_spreview, "_fpreview": cmd_fpreview}
 
 
 def main(argv=None):
@@ -410,5 +611,5 @@ def main(argv=None):
         cfg = config.load_config()
         return COMMANDS[args.cmd](cfg, args)
     except (ValueError, sync.AgentError) as e:
-        print("proj: %s" % e, file=sys.stderr)
+        print("proj: %s" % ui._one_line(e), file=sys.stderr)
         return 2

@@ -26,10 +26,10 @@ def test_load_config_defaults_and_validation(tmp_path):
     assert cfg["hosts"][0]["local"] is True and cfg["tiers_days"] == {"active": 14, "stale": 90}
     with pytest.raises(ValueError):
         config.load_config(write_cfg(tmp_path, {"hosts": [{"name": "x"}]}))
-    cfg = config.load_config(write_cfg(tmp_path, {"hosts": [{"name": "sg", "ssh": "sg"}],
+    cfg = config.load_config(write_cfg(tmp_path, {"hosts": [{"name": "s-host", "ssh": "s-host"}],
                                                   "ssh_timeout": 5}))
     assert cfg["ssh_timeout"] == 5 and cfg["scan_depth"] == 2
-    assert config.host_by_name(cfg, "sg")["ssh"] == "sg"
+    assert config.host_by_name(cfg, "s-host")["ssh"] == "s-host"
     with pytest.raises(ValueError):
         config.host_by_name(cfg, "nope")
 
@@ -227,3 +227,36 @@ def test_first_failed_sync_writes_stub_cache(tmp_path, fake_ssh):
 def test_load_config_rejects_dash_ssh_alias(tmp_path):
     with pytest.raises(ValueError):
         config.load_config(write_cfg(tmp_path, {"hosts": [{"name": "x", "ssh": "-oProxyCommand=x"}]}))
+
+
+
+@pytest.mark.parametrize("host, want", [
+    ({"name": "a", "local": True}, "tmux"),
+    ({"name": "a", "local": True, "tmux": False}, False),
+    ({"name": "a", "local": True, "tmux": "always"}, "tmux"),
+    ({"name": "a", "local": True, "mux": "zellij"}, "zellij"),
+    ({"name": "a", "local": True, "mux": False, "tmux": True}, False),  # mux wins
+    ({"name": "a", "ssh": "a", "mux": "tmux"}, "tmux"),
+])
+def test_resolve_mux(host, want):
+    assert config.resolve_mux(host, platform="linux") == (want, None)
+
+
+def test_zellij_only_on_local_linux():
+    mux, warn = config.resolve_mux({"name": "e", "ssh": "e", "mux": "zellij"}, platform="linux")
+    assert mux is False and "e" in warn and "zellij" in warn
+    mux, warn = config.resolve_mux({"name": "m", "local": True, "mux": "zellij"}, platform="darwin")
+    assert mux is False and "Linux" in warn
+
+
+def test_bad_mux_value_is_an_error(tmp_path):
+    with pytest.raises(ValueError):
+        config.resolve_mux({"name": "a", "local": True, "mux": "screen"})
+
+
+def test_load_config_fills_mux_and_warnings(tmp_path):
+    cfg = config.load_config(write_cfg(tmp_path, {"hosts": [
+        {"name": "s-host", "local": True, "mux": "zellij"},
+        {"name": "em", "ssh": "em", "mux": "zellij"}]}))
+    assert [h["mux"] for h in cfg["hosts"]] == ["zellij" if sys.platform.startswith("linux") else False, False]
+    assert any("em" in w for w in cfg["warnings"])

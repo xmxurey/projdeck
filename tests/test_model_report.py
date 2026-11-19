@@ -31,7 +31,7 @@ def test_tiers_and_activity():
 def test_rows_merge_hosts_and_sort():
     # grouped by host in config order (unknown hosts last), newest first within a host
     caches = [{"host": "zz", "projects": [proj("/z", mtime=NOW)]},
-              {"host": "vm", "stale_since": 5, "projects": [proj("/new", mtime=NOW - DAY)]},
+              {"host": "vm", "stale_since": 5, "home": "/home/u", "projects": [proj("/new", mtime=NOW - DAY)]},
               {"host": "mac", "projects": [proj("/old", mtime=NOW - 100 * DAY),
                                            proj("/mid", mtime=NOW - 20 * DAY)]}]
     rows = model.rows(caches, CFG, NOW)
@@ -40,6 +40,7 @@ def test_rows_merge_hosts_and_sort():
         ("zz", "/z", "active")]
     assert rows[2]["ssh"] == "vm-alias" and rows[2]["local"] is False and rows[2]["stale_since"] == 5
     assert rows[0]["local"] is True
+    assert rows[2]["home"] == "/home/u" and rows[0]["home"] is None
     assert model.find_row(rows, "mac", "/old") is rows[1]
     assert model.find_row(rows, "mac", "/nope") is None
 
@@ -119,3 +120,10 @@ def test_all_prompts_order_and_old_caches():
     rows = model.rows(caches, CFG, NOW)
     assert [(s["id"], t) for _, s, t in model.all_prompts(rows)] == [
         ("b", "b1"), ("a", "a1"), ("a", "a2")]
+
+
+def test_rows_put_flagged_first_within_host():
+    caches = [{"host": "mac", "projects": [proj("/new", mtime=NOW), dict(proj("/old", mtime=NOW - 50 * DAY), flag=True)]},
+              {"host": "vm", "projects": [dict(proj("/v", mtime=NOW - 9 * DAY), flag=True)]}]
+    rows = model.rows(caches, CFG, NOW)
+    assert [(r["host"], r["path"]) for r in rows] == [("mac", "/old"), ("mac", "/new"), ("vm", "/v")]

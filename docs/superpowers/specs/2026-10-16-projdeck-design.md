@@ -69,7 +69,7 @@ collect.py（只读，只用标准库，输出 JSON）
 {
   "hosts": [
     {"name": "mac", "local": true, "roots": ["~/dev", "~/code"]},
-    {"name": "sg",  "ssh": "sg",   "roots": ["~"]}
+    {"name": "s-host",  "ssh": "s-host",   "roots": ["~"]}
   ],
   "tiers_days": {"active": 14, "stale": 90},
   "scan_depth": 2,
@@ -87,7 +87,7 @@ collect.py（只读，只用标准库，输出 JSON）
 
 ```json
 {
-  "schema": 1, "host": "sg", "collected_at": 1760600000,
+  "schema": 1, "host": "s-host", "collected_at": 1760600000,
   "projects": [{
     "path": "/home/ubuntu/quant", "exists": true,
     "git": {"branch": "main", "last_commit_ts": 0, "dirty": 2, "untracked": 0,
@@ -190,6 +190,7 @@ fzf 列表中每行显示：主机、分档图标、项目名、最后活动（�
 ## 9. 不在 v1 范围内
 
 - Mac App 和内嵌终端（v2：Tauri 加 xterm.js，复用 collect 和缓存格式）。
+  - 2026-10-28 决定暂缓：终端版已经够用，先继续打磨 CLI。
 - 会话全文搜索、Codex 及其他 agent 的会话。
 - 自动安装 Claude Code hooks，以及修改 CLAUDE.md 约定。
 

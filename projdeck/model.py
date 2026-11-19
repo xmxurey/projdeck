@@ -1,7 +1,8 @@
 """Turn per-host caches into one sorted list of project rows."""
 TIER_ICON = {"active": "●", "stale": "◐", "abandoned": "○", "deleted": "✗"}
 ROW_DEFAULTS = {"exists": True, "git": None, "last_mtime": 0, "suspicious": [], "progress": "",
-                "sessions": [], "errors": []}
+                "sessions": [], "errors": [], "tag": None,
+                "flag": False}
 
 
 def last_activity(p):
@@ -32,12 +33,17 @@ def rows(caches, cfg, now):
             r.update(p)
             r.update(host=c["host"], local=bool(h.get("local")), ssh=h.get("ssh"),
                      tmux=h.get("tmux", True),
+                     mux=h.get("mux", "tmux" if h.get("tmux", True) else False),
+                     home=c.get("home"),
+                     tags=c.get("tags") or [],
                      activity=last_activity(p), tier=tier(p, now, cfg["tiers_days"]),
                      stale_since=c.get("stale_since"))
             out.append(r)
-    # group by host in config order (unknown hosts last), newest first within a host
+    # group by host in config order (unknown hosts last); within a host flagged (🚩 in
+    # PROJECTS.md) first, then newest first
     order = {h["name"]: i for i, h in enumerate(cfg["hosts"])}
-    out.sort(key=lambda r: (order.get(r["host"], len(order)), r["host"], -r["activity"]))
+    out.sort(key=lambda r: (order.get(r["host"], len(order)), r["host"], not r.get("flag"),
+                            -r["activity"]))
     return out
 
 
@@ -84,3 +90,15 @@ def human_age(seconds):
         if s >= n:
             return "%d%s" % (s // n, unit)
     return "<1m"
+
+
+def span(seconds):
+    """Compact duration: 45s / 55m / 2h28m; "—" when unknown."""
+    if seconds is None:
+        return "—"
+    s = max(0, int(seconds))
+    if s < 60:
+        return "%ds" % s
+    if s < 3600:
+        return "%dm" % (s // 60)
+    return "%dh%02dm" % (s // 3600, s % 3600 // 60)

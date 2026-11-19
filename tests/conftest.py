@@ -20,6 +20,58 @@ def write(path, content="x"):
         f.write(content)
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path_factory, monkeypatch):
+    """Never read the real ~ (e.g. ~/PROJECTS.md); tests needing a home set HOME again."""
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
+@pytest.fixture(autouse=True)
+def no_real_claude(tmp_path_factory, monkeypatch):
+    """`claude agents --json` must never reach the real CLI, here or in child processes
+    (fake ssh): put a stub that prints [] first on PATH."""
+    d = tmp_path_factory.mktemp("fakeclaude")
+    stub = d / "claude"
+    stub.write_text("#!/bin/sh\necho '[]'\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(d) + os.pathsep + os.environ["PATH"])
+
+
+@pytest.fixture(autouse=True)
+def no_real_zellij_or_ssh(tmp_path_factory, monkeypatch):
+    """Neither `zellij` nor `ssh` may reach the real program: stand-ins come first on PATH.
+    zellij answers every call with failure (= "not usable"); ssh fails with 255. Both record
+    their arguments, one call per line, in <dir>/calls (env PROJ_STUB_CALLS). Tests that need
+    a working one put their own stand-in in front."""
+    d = tmp_path_factory.mktemp("fakeremote")
+    calls = d / "calls"
+    for prog, code in (("zellij", 1), ("ssh", 255)):
+        stub = d / prog
+        stub.write_text('#!/bin/sh\necho "%s $*" >> "%s"\nexit %d\n' % (prog, calls, code))
+        stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(d) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PROJ_STUB_CALLS", str(calls))
+
+
+@pytest.fixture(autouse=True)
+def clean_cli_notices():
+    """cli collects refresh problems in a module-level list; no test may inherit another's."""
+    from projdeck import cli
+    del cli._notices[:]
+    yield
+    del cli._notices[:]
+
+
+@pytest.fixture(autouse=True)
+def live_sync_spawns(monkeypatch):
+    """cli.background_live_sync must never start a real `proj sync --live`: replace it with a
+    recorder; the list of calls is available by requesting this fixture."""
+    from projdeck import cli
+    calls = []
+    monkeypatch.setattr(cli, "background_live_sync", lambda *a, **k: calls.append(1))
+    return calls
+
+
 @pytest.fixture
 def make_repo():
     def _make(path, files=None, commit=True):
