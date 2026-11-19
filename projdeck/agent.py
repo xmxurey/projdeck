@@ -15,6 +15,7 @@ from collections import deque
 import shlex
 import shutil
 import socket
+import stat as statmod
 import subprocess
 import sys
 import time
@@ -35,10 +36,16 @@ HOME_SKIP = {"Library", "Applications", "Movies", "Music", "Pictures", "Public",
              "Desktop", "Documents", "Downloads"}
 
 
+# A scanned repo's own .git/config is untrusted: keep it from running commands
+# (fsmonitor hook) and from writing to the index on a read-only status.
+GIT_SAFE_CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+
+
 def git(path, *args):
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
     try:
-        r = subprocess.run(["git", "-C", path] + list(args), stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, timeout=GIT_TIMEOUT)
+        r = subprocess.run(["git"] + GIT_SAFE_CONFIG + ["-C", path] + list(args), stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=GIT_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         raise RuntimeError("git timed out after %ds" % GIT_TIMEOUT)
     except OSError as e:
@@ -176,17 +183,52 @@ def parse_backlog(text):
     return {"items": items, "raw": raw}
 
 
+UNTRUSTED_READ_MAX = 1024 * 1024  # bytes; files inside scanned projects
+
+
+def _resolves_inside(path, root):
+    real, top = os.path.realpath(path), os.path.realpath(root)
+    return real == top or real.startswith(top.rstrip(os.sep) + os.sep)
+
+
+def read_untrusted(path, root, limit=UNTRUSTED_READ_MAX, whole=False):
+    """(text, mtime) of a file that lives in a scanned project. The resolved path must
+    stay under root (no symlink out to ~/.ssh), it must be a regular file (no FIFO or
+    /dev/zero), and at most `limit` bytes are read; whole=True raises ValueError for a
+    longer file instead of truncating it. Other refusals raise OSError."""
+    if not _resolves_inside(path, root):
+        raise OSError("refusing %s: it resolves outside %s" % (path, root))
+    fd = os.open(os.path.realpath(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not statmod.S_ISREG(st.st_mode):
+            raise OSError("refusing %s: not a regular file" % path)
+        chunks, left = [], limit + 1
+        while left > 0:
+            b = os.read(fd, min(left, 65536))
+            if not b:
+                break
+            chunks.append(b)
+            left -= len(b)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > limit:
+        if whole:
+            raise ValueError("%s is larger than %d bytes" % (path, limit))
+        data = data[:limit]
+    return data.decode("utf-8", "replace"), st.st_mtime
+
+
 def read_backlog(project_path):
     f = os.path.join(project_path, BACKLOG_PATH)
     try:
-        st = os.stat(f)
-        with open(f, encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+        text, mtime = read_untrusted(f, project_path)
     except OSError:
         return None
     r = parse_backlog(text)
     done = sum(1 for i in r["items"] if i["done"])
-    return {"path": BACKLOG_PATH, "mtime": int(st.st_mtime), "items": r["items"],
+    return {"path": BACKLOG_PATH, "mtime": int(mtime), "items": r["items"],
             "open": len(r["items"]) - done, "done": done, "raw": r["raw"]}
 
 
@@ -218,9 +260,12 @@ def last_mtime(path, max_files=MAX_FILES, skip_paths=()):
 
 def progress(path, repo):
     pf = os.path.join(path, "PROGRESS.md")
-    if os.path.isfile(pf):
-        with open(pf, encoding="utf-8", errors="replace") as f:
-            lines = [line.rstrip() for _, line in zip(range(10), f)]
+    if os.path.lexists(pf):
+        try:
+            text = read_untrusted(pf, path, 64 * 1024)[0]
+        except OSError:
+            return ""
+        lines = [line.rstrip() for line in text.splitlines()[:10]]
         return "\n".join(line for line in lines if line.strip())
     if repo:
         try:
@@ -1161,9 +1206,11 @@ SDD_DONE_RE = re.compile(r"Task\s+(\w+)\s*[:：]\s*complete", re.I)
 SDD_BOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(.*?)\s*$", re.M)
 
 
-def _read_text(path):
-    with open(path, encoding="utf-8", errors="replace") as f:
-        return f.read()
+LEDGER_READ_MAX = 16 * 1024 * 1024  # log.jsonl of a long run
+
+
+def _read_text(path, root, limit=UNTRUSTED_READ_MAX):
+    return read_untrusted(path, root, limit, whole=True)[0]
 
 
 def _iso_ts(v):
@@ -1189,14 +1236,14 @@ def _iso_ts(v):
 def _run_ledger_tasks(checkout, errors):
     runs = os.path.join(checkout, "docs", "dev", "runs")
     try:
-        run_id = _read_text(os.path.join(runs, ".active")).strip()
-    except OSError:
+        run_id = _read_text(os.path.join(runs, ".active"), checkout).strip()
+    except (OSError, ValueError):
         return None
     if not run_id or "/" in run_id or run_id in (".", ".."):
         return None
     sp = os.path.join(runs, run_id, "state.json")
     try:
-        state = json.loads(_read_text(sp))
+        state = json.loads(_read_text(sp, checkout, LEDGER_READ_MAX))
         if not isinstance(state, dict) or not isinstance(state.get("tasks", []), list):
             raise ValueError("tasks is not a list")
     except (OSError, ValueError) as e:
@@ -1224,8 +1271,8 @@ def _run_ledger_tasks(checkout, errors):
                       "status": status, "note": note})
     merges = []
     try:
-        log = _read_text(os.path.join(runs, run_id, "log.jsonl"))
-    except OSError:
+        log = _read_text(os.path.join(runs, run_id, "log.jsonl"), checkout, LEDGER_READ_MAX)
+    except (OSError, ValueError):
         log = ""
     for line in log.splitlines():
         try:
@@ -1257,8 +1304,8 @@ def _sdd_tasks(checkout, since_ts, errors):
     try:
         if os.stat(pp).st_mtime < since_ts:
             return None
-        text = _read_text(pp)
-    except OSError:
+        text = _read_text(pp, checkout)
+    except (OSError, ValueError):
         return None
     plan = []
     m = SDD_PLAN_RE.search(text)
@@ -1266,8 +1313,8 @@ def _sdd_tasks(checkout, since_ts, errors):
         ref = m.group(1).strip().strip("`").strip()
         full = ref if os.path.isabs(ref) else os.path.join(checkout, ref)
         try:
-            plan = _plan_items(_read_text(full))
-        except OSError as e:
+            plan = _plan_items(_read_text(full, checkout))
+        except (OSError, ValueError) as e:
             errors.append("sdd plan %s: %s" % (full, e))
     items = []
     if plan:
@@ -1309,8 +1356,8 @@ def _plan_file_tasks(checkout, since_ts):
             cands.append((mt, n, p))
     for _, _, p in sorted(cands, reverse=True):
         try:
-            tasks = _plan_items(_read_text(p))
-        except OSError:
+            tasks = _plan_items(_read_text(p, checkout))
+        except (OSError, ValueError):
             continue
         if tasks:
             return {"source": "plan", "label": "计划（无进度记录）", "path": p, "checkout": checkout,
