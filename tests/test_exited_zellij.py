@@ -5,7 +5,7 @@ import re
 import shlex
 import time
 
-from projdeck import cli, report, sync, ui
+from projdeck import cli, config, report, sync, ui
 
 NOW = 1790000000
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -58,8 +58,8 @@ def lv(name, exited, at=NOW - 120):
     return {"host": name, "collected_at": at, "zellij_exited": exited}
 
 
-def render(board, hosts=(ZELLIJ,), lives=()):
-    return report.render([], [], NOW, board=board, lives=list(lives), cfg={"hosts": list(hosts)})
+def render(board, hosts=(ZELLIJ,), lives=(), rows=()):
+    return report.render(list(rows), [], NOW, board=board, lives=list(lives), cfg={"hosts": list(hosts)})
 
 
 def sec_of(out):
@@ -68,9 +68,9 @@ def sec_of(out):
 
 def test_zellij_in_scope_is_the_condition_live_request_uses():
     for h in (ZELLIJ, REMOTE, TMUX, {"name": "x", "local": True}):
-        assert sync.zellij_in_scope(h) == bool(sync.live_request({"hosts": [h]}, h, []).get("zellij"))
-    assert sync.zellij_in_scope(ZELLIJ) and not sync.zellij_in_scope(REMOTE)
-    assert not sync.zellij_in_scope(TMUX)
+        assert config.zellij_in_scope(h) == bool(sync.live_request({"hosts": [h]}, h, []).get("zellij"))
+    assert config.zellij_in_scope(ZELLIJ) and not config.zellij_in_scope(REMOTE)
+    assert not config.zellij_in_scope(TMUX)
 
 
 def test_report_lists_cleanup_commands():
@@ -131,7 +131,9 @@ def test_report_shows_live_cache_age_per_in_scope_host():
 
 
 def test_report_proj_session_gets_auto_delete_note():
-    out = render(bd(exited("proj-x", "dao")), lives=[lv("s-host", [])])
+    from projdeck.model import ROW_DEFAULTS
+    row = dict(ROW_DEFAULTS, host="s-host", path="/home/u/x", home="/home/u", tier="active", activity=NOW)
+    out = render(bd(exited("proj-x", "dao")), lives=[lv("s-host", [])], rows=[row])
     line = [ln for ln in out.splitlines() if "delete-session proj-x" in ln][0]
     assert "proj 下次在该项目按 Enter 时会自动删除" in line
     plain = [ln for ln in out.splitlines() if "delete-session dao" in ln][0]

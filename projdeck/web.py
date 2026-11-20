@@ -7,17 +7,20 @@ import os
 import re
 import time
 
-from projdeck.board import TOP_MARK, UNSAFE_NAME
-from projdeck.model import human_age, span  # noqa: F401 (span: part of web's API)
+from projdeck.board import LIVE_LABEL_SECONDS, TOP_MARK, UNSAFE_NAME, host_freshness
+from projdeck.model import human_age, span
+from projdeck.paths import rel_to_home
 from projdeck.vendor.webkit.webkit import h, layout
 
 SEG_CLASS = {"busy": "busy", "sub": "sub", "wait": "wait", "wait_now": "wait-now"}
 SEG_LABEL = {"busy": "Claude 自己在干活", "sub": "子代理在干活",
              "wait": "闲置等输入", "wait_now": "还在闲置等输入"}
-SEG_FILL = {"busy": "#2F5D8A", "sub": "#8DB4DC", "wait": "#E8954A", "wait_now": "#F6CFA6"}
 TASK_FILL = {"done": "#2F7D5B", "doing": "#2F5D8A", "todo": "#D5D9E0", "stuck": "#C0392B"}
 TASK_MARK = {"done": "✓", "doing": "◉", "todo": "○", "stuck": "!"}
 FOLD_OVER = 12
+# attach is empty outside zellij/tmux, and for a zellij session whose name starts with "-"
+# (agent.attach_map refuses it: it would be read as an option); say both, not just the first
+NO_ATTACH = "（不在 zellij / tmux 里）；会话名以 - 开头的 zellij 会话也没有接入命令，请手动接入"
 
 TL_W, TL_LABEL_W, TL_RIGHT_W, LANE_H, AXIS_H = 1000, 230, 190, 34, 24
 _HOME = re.compile(r"^/(?:home|Users)/[^/]+/(.+)$")
@@ -26,9 +29,9 @@ _HOME = re.compile(r"^/(?:home|Users)/[^/]+/(.+)$")
 def project_name(path):
     """Path relative to the home directory (dev/projdeck), as the terminal shows it."""
     p = (path or "").rstrip("/")
-    home = os.path.expanduser("~").rstrip("/")
-    if home and p.startswith(home + "/"):
-        return p[len(home) + 1:]
+    rel = rel_to_home(p, os.path.expanduser("~"))
+    if rel is not None:
+        return rel
     m = _HOME.match(p)
     if m:
         return m.group(1)
@@ -171,7 +174,7 @@ def _attach(s):
     cmd = s.get("attach")
     if cmd:
         return '<p class="card-attach"><code>%s</code></p>' % h(cmd)
-    return '<p class="card-attach muted">（不在 zellij / tmux 里）</p>'
+    return '<p class="card-attach muted">%s</p>' % h(NO_ATTACH)
 
 
 def _errors(s):
@@ -472,8 +475,10 @@ def render_backlog(board, now=None):
 # ------------------------------------------------------------------ header
 
 def _host_chip(hst, now):
-    at = hst.get("live_at") or hst.get("collect_at")
-    age = max(0, now - at) if at else None
+    """Only the live layer speaks for a host's sessions: its age and level come from
+    board.host_freshness at request time, never from the collect cache."""
+    fr = host_freshness(hst, now)
+    age = fr["age"]
     name = hst.get("name")
     if hst.get("error") or hst.get("stale_since"):
         err = hst.get("error") or "同步失败"
@@ -483,11 +488,12 @@ def _host_chip(hst, now):
     elif hst.get("source") == "none":
         text, cls = "%s 活会话来源不可用，会话状态未知" % name, "dot-err"
     elif age is None:
-        text, cls = "%s 还没有数据" % name, "dot-warn"
-    elif age <= 30:
+        text, cls = "%s 活会话还没采集" % name, "dot-warn"
+    elif age <= LIVE_LABEL_SECONDS and fr["level"] == "fresh":
         text, cls = "%s 实时" % name, "dot-ok"
     else:
-        text, cls = "%s %s 前采集" % (name, span(age)), "dot-warn" if age > 300 else "dot-ok"
+        text = "%s %s 前采集" % (name, span(age))
+        cls = "dot-ok" if fr["level"] == "fresh" else "dot-warn"
     return '<span class="host"><svg class="dot %s" width="8" height="8" viewBox="0 0 8 8" ' \
            'aria-hidden="true"><circle cx="4" cy="4" r="4"/></svg>%s</span>' % (cls, h(text))
 

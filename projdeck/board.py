@@ -4,9 +4,9 @@ import shlex
 import time
 from bisect import bisect_right
 
+from . import config
 from .config import DEFAULTS as CONFIG_DEFAULTS
-from .model import human_age, last_activity, tier
-from .sync import zellij_in_scope
+from .model import git_failed, human_age, last_activity, tier
 from .termtext import has_control, one_line
 
 CELL_MIN_SECONDS = 30
@@ -65,7 +65,11 @@ def day_bins(ts_list, now, days=14):
 
 # ---- build: session grouping, summary, status-line document ----
 
-HOST_STALE_SECONDS = 600
+# one verdict for "is this host's live data current": every exit (cards, counts, tiles,
+# status line) reads host_freshness; age counts from our own clock (synced_at)
+FRESH_SECONDS = {"local": 60, "remote": 300}
+STALE_SECONDS = {"local": 120, "remote": 600}
+LIVE_LABEL_SECONDS = 30
 UNSAFE_NAME = "名字含控制字符，先用 `zellij list-sessions` 核对再手动删除"
 # "--": a name starting with "-" is not taken as an option (zellij 0.44.3 checked)
 DELETE_SESSION = "zellij delete-session -- "
@@ -108,11 +112,6 @@ def _ended_item(s, host, now_day, commits, now):
     return item
 
 
-def _collect_git_failed(p):
-    """A collected project whose git could not be read (not the same as "not a git repo")."""
-    return not p.get("git") and any(str(e).startswith("git:") for e in p.get("errors") or ())
-
-
 def _last_commit(path, live_projects, collect_projects):
     """(last_commit {"ts", "subject"} or None, git_failed) of a project. Live data speaks for
     it when it has an entry, otherwise the collect cache. None without failure: no commits
@@ -128,7 +127,7 @@ def _last_commit(path, live_projects, collect_projects):
     p = collect_projects.get(path)
     if not p:
         return None, False
-    if _collect_git_failed(p):
+    if git_failed(p):
         return None, True
     g = p.get("git") or {}
     if g.get("last_commit_ts"):
@@ -143,12 +142,29 @@ def _attach_for(attach, host, local):
     return attach
 
 
-def _host_entry(name, c, lv, cfg_host, local):
+def host_freshness(h, now):
+    """{"level": fresh|aging|stale|unknown, "age": seconds or None} for a hosts[] entry."""
+    synced = h.get("live_synced_at")
+    if h.get("live_unknown") or not synced:
+        return {"level": "unknown", "age": None}
+    kind = "local" if h.get("local") else "remote"
+    age = max(0, int(now - synced))  # a clock running ahead never gives a negative age
+    if age <= FRESH_SECONDS[kind]:
+        level = "fresh"
+    elif age <= STALE_SECONDS[kind]:
+        level = "aging"
+    else:
+        level = "stale"
+    return {"level": level, "age": age}
+
+
+def _host_entry(name, c, lv, cfg_host, local, now):
     errors = [str(e) for e in lv.get("errors") or ()]
-    return {
+    h = {
         "name": name,
         "local": name in local,
         "live_at": lv.get("collected_at") or None,
+        "live_synced_at": lv.get("synced_at") or lv.get("collected_at") or None,
         "collect_at": c.get("collected_at") or None,
         "stale_since": lv.get("stale_since") or c.get("stale_since") or None,
         "error": lv.get("last_error") or c.get("last_error") or None,
@@ -158,8 +174,10 @@ def _host_entry(name, c, lv, cfg_host, local):
         # this host's sessions is unknown (a project's git error does not make it so)
         "live_unknown": not lv.get("collected_at") or lv.get("source") == "none",
         # zellij looked at: in scope, and the live data says what it found (None: not listed)
-        "zellij_checked": zellij_in_scope(cfg_host) and lv.get("zellij_exited") is not None,
+        "zellij_checked": config.zellij_in_scope(cfg_host) and lv.get("zellij_exited") is not None,
     }
+    h["freshness"] = host_freshness(h, now)
+    return h
 
 
 def build(caches, lives, cfg, now):
@@ -172,12 +190,12 @@ def build(caches, lives, cfg, now):
     hosts = []
     for name in names:
         c, lv = cache_by.get(name) or {}, live_by.get(name) or {}
-        hosts.append(_host_entry(name, c, lv, cfg_hosts.get(name) or {}, local))
+        hosts.append(_host_entry(name, c, lv, cfg_hosts.get(name) or {}, local, now))
     host_by = {h["name"]: h for h in hosts}
 
     waiting, busy, idle, stale, stale_host, ended, unknown = [], [], [], [], [], [], []
     today = {"busy": 0, "sub": 0, "wait": 0}
-    commits_by_project, git_failed = {}, set()
+    commits_by_project, failed_git = {}, set()
     for name in names:
         c, lv = cache_by.get(name) or {}, live_by.get(name) or {}
         collect_projects = {p.get("path"): p for p in c.get("projects") or ()}
@@ -190,16 +208,16 @@ def build(caches, lives, cfg, now):
                 (info or {}).get("commits") or [])
         for path in set(collect_projects) | set(live_projects):
             if _last_commit(path, live_projects, collect_projects)[1]:
-                git_failed.add((name, path))
-        age = max(0, now - (lv.get("collected_at") or 0)) if lv else None
-        host_stale = lv and name not in local and age > HOST_STALE_SECONDS
+                failed_git.add((name, path))
+        fresh = host_by[name]["freshness"]
+        host_stale, age = fresh["level"] == "stale", fresh["age"]
         is_unknown = host_by[name]["live_unknown"]
         for s in lv.get("sessions") or ():
             segs = s.get("segments") or []
             for k, v in clip_total(segs, day, now).items():
                 today[k] += v
             key = (name, s.get("project"))
-            commits = None if key in git_failed else commits_by_project.get(key, ())
+            commits = None if key in failed_git else commits_by_project.get(key, ())
             if is_unknown:  # e.g. source "none": every session reads as ended, which is a guess
                 e = _ended_item(s, name, day, commits, now)
                 e["state"] = "unknown"
@@ -249,7 +267,7 @@ def build(caches, lives, cfg, now):
            "ended_today": ended, "unknown": unknown, "stale": stale,
            "stale_host_sessions": stale_host}
     out["built_at"] = now
-    out["lanes"] = build_lanes(out, commits_by_project, git_failed, now)
+    out["lanes"] = build_lanes(out, commits_by_project, failed_git, now)
     exited = []
     for name in names:
         if not host_by[name]["zellij_checked"]:
@@ -344,10 +362,8 @@ def _headline(s):
 
 
 def _host_trusted(h, now):
-    """Live data of this host can say "no session runs": checked, and (remote) not stale."""
-    if h["live_unknown"]:
-        return False
-    return h["local"] or now - h["live_at"] <= HOST_STALE_SECONDS
+    """Live data of this host can say "no session runs": checked and not stale."""
+    return host_freshness(h, now)["level"] in ("fresh", "aging")
 
 
 def build_tiles(caches, board, names, cfg, now):
@@ -374,12 +390,12 @@ def build_tiles(caches, board, names, cfg, now):
                 "none" if trusted.get(host) else "unknown"
             git = p.get("git") or {}
             todos = _open_items(p.get("backlog"))
-            git_failed = _collect_git_failed(p)
+            failed = git_failed(p)
             if sessions:
                 text = _headline(sessions[0])
             elif todos:
                 text = todos[0].get("title") or ""
-            elif git_failed:
+            elif failed:
                 text = "git 读取失败"
             elif git:
                 ts = git.get("last_commit_ts") or 0
@@ -391,7 +407,7 @@ def build_tiles(caches, board, names, cfg, now):
                           if isinstance(s.get("tasks"), dict)), [])
             tiles.append({"host": host, "project": p.get("path"), "state": state,
                           "todo": (p.get("backlog") or {}).get("open") or 0,
-                          "commits_14d": (None if git_failed
+                          "commits_14d": (None if failed
                                           else day_bins(git.get("commit_ts_14d") or [], now, TILE_DAYS)),
                           "tasks": [i.get("status") for i in tasks], "text": text,
                           "_act": last_activity(p)})
@@ -407,7 +423,9 @@ LANE_MAX_ROWS = 12
 
 
 def _lane_window(sessions, day, now):
-    """Window start: the hour of today's first activity, never before 00:00, at least 3h wide."""
+    """Window (start, now): starts at the earlier of now - 3h and the hour of today's first
+    activity (activity before 00:00 is clipped to 00:00). So it is at least 3h wide, and
+    before 03:00 the 3h minimum can reach back past midnight into yesterday."""
     firsts = [max(seg[1], day) for s in sessions for seg in s.get("segments") or ()
               if seg[2] > day and seg[1] < now]
     start = now - LANE_MIN_SECONDS
@@ -416,8 +434,8 @@ def _lane_window(sessions, day, now):
     return start, now
 
 
-def build_lanes(board, commits_by_project, git_failed, now):
-    """Swim-lane rows for the overview timeline, ordered like the board columns. git_failed:
+def build_lanes(board, commits_by_project, failed_git, now):
+    """Swim-lane rows for the overview timeline, ordered like the board columns. failed_git:
     (host, project) keys whose git could not be read (no commit marks is not "no commits")."""
     day = today_start(now)
     ordered = [(s, s.get("state")) for s in board["waiting"] + board["busy"] + board["idle"]]
@@ -440,7 +458,7 @@ def build_lanes(board, commits_by_project, git_failed, now):
         total = clip_total(segs, start, end)
         rows.append({"host": s.get("host"), "project": s.get("project"), "session_id": s.get("id"),
                      "state": state, "segments": segs, "commits": commits, "merges": merges,
-                     "git_failed": key in git_failed,
+                     "git_failed": key in failed_git,
                      "busy_s": total["busy"], "wait_s": total["wait"]})
     return {"start": start, "end": end, "rows": rows[:LANE_MAX_ROWS],
             "more": max(0, len(rows) - LANE_MAX_ROWS)}

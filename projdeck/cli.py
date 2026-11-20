@@ -1,13 +1,15 @@
 """`proj` command line."""
 import argparse
+import errno
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import time
 
-from projdeck import agent, board, config, model, opener, report, serve, sync, ui
+from projdeck import agent, board, config, fsutil, model, opener, report, serve, sync, termtext, ui
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,7 +34,7 @@ def _ask(prompt):
 
 def print_sync(status):
     for s in status:
-        print("%s: %s" % (s["host"], "ok" if s["ok"] else "FAILED (%s)" % ui._one_line(s["error"])))
+        print("%s: %s" % (s["host"], "ok" if s["ok"] else "FAILED (%s)" % termtext.one_line(s["error"])))
 
 
 def _spawn_detached(marker, args, now=None):
@@ -55,7 +57,37 @@ _notices = []  # problems found while refreshing, shown in the fzf header by cmd
 
 
 def _note(text):
-    _notices.append(ui._one_line(text))
+    _notices.append(termtext.one_line(text))
+
+
+def flush_notices():
+    """Print what is still queued to stderr, one line each; main() does it when any command
+    ends, since a notice queued by then would never be read."""
+    for text in take_notices():
+        print(termtext.one_line(text), file=sys.stderr)
+
+
+def usage_log_problem():
+    """Why usage.jsonl is not being written (no path), or None when it is fine or can still be created."""
+    path = os.path.join(sync.cache_dir(), "usage.jsonl")
+    try:
+        st = os.lstat(path)
+    except OSError:
+        # no file yet: the first append creates it, which needs a writable directory (the
+        # nearest existing one; append_line makes the missing levels)
+        d = os.path.dirname(path)
+        while d and not os.path.exists(d):
+            d = os.path.dirname(d)
+        if d and not (os.path.isdir(d) and os.access(d, os.W_OK | os.X_OK)):
+            return "directory not writable"
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        return "symbolic link"
+    if not stat.S_ISREG(st.st_mode):
+        return "not a regular file"
+    if not os.access(path, os.W_OK):
+        return "not writable"
+    return None
 
 
 def take_notices():
@@ -80,12 +112,12 @@ REMOTE_LIVE_SECONDS = 120
 
 def fresh_lives(cfg, now):
     """Live caches for the terminal. The local host is recomputed in this process when its
-    cache is older than 30 s; remote hosts older than 120 s start a background sync and
+    cache is older than LOCAL_LIVE_SECONDS; remote hosts older than REMOTE_LIVE_SECONDS start a background sync and
     keep what is cached. Never waits on ssh."""
     remote_due = False
     for h in cfg["hosts"]:
         c = sync.read_live(h["name"]) or {}
-        age = now - (c.get("collected_at") or c.get("synced_at") or 0)
+        age = now - (c.get("synced_at") or c.get("collected_at") or 0)
         if h.get("local"):
             if age > LOCAL_LIVE_SECONDS:
                 sync.sync_live(h, cfg, now)
@@ -114,10 +146,10 @@ def open_dashboard(cfg):
     if not url:
         return "set dashboard_url in ~/.config/proj/config.json"
     if opener.open_url(url):
-        return "opened %s" % ui._one_line(url)
+        return "opened %s" % termtext.one_line(url)
     if not url.startswith(("http://", "https://")):
-        return "dashboard_url 不是 http(s) 地址，无法打开：%s" % ui._one_line(url)
-    return "看板：%s（在 Mac 浏览器里打开）" % ui._one_line(url)
+        return "dashboard_url 不是 http(s) 地址，无法打开：%s" % termtext.one_line(url)
+    return "看板：%s（在 Mac 浏览器里打开）" % termtext.one_line(url)
 
 
 def fresh_caches(cfg, now):
@@ -132,28 +164,49 @@ def fresh_caches(cfg, now):
     return sync.load_caches(cfg)
 
 
+_usage_warned = False  # the failed-usage-log notice is shown once per process
+
+
+def _usage_failure(e):
+    """Short reason for a failed usage-log write: an errno name, never the path."""
+    if isinstance(e, OSError):
+        if e.errno is None:
+            return "not a regular file" if "not a regular file" in str(e) else "OSError"
+        return errno.errorcode.get(e.errno) or "errno %d" % e.errno
+    if isinstance(e, UnicodeEncodeError):
+        return "not ASCII"
+    return "ValueError"
+
+
 def log_event(action, host, path, **extra):
-    """Local-only usage log (~/.cache/proj/usage.jsonl), summarised by `proj report`."""
+    """Local-only usage log (~/.cache/proj/usage.jsonl), summarised by `proj report`.
+    Returns False when the line was not written (a notice says so, once); never raises."""
+    global _usage_warned
     ev = dict(ts=int(time.time()), action=action, host=host, path=path, **extra)
     try:
-        os.makedirs(sync.cache_dir(), exist_ok=True)
-        with open(os.path.join(sync.cache_dir(), "usage.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-    except OSError:
-        pass  # never let logging break the tool
+        fsutil.append_line(os.path.join(sync.cache_dir(), "usage.jsonl"), json.dumps(ev) + "\n")
+    except (OSError, ValueError) as e:  # never let logging break the tool, but say so once
+        if not _usage_warned:
+            _usage_warned = True
+            _note("usage log not written: %s" % _usage_failure(e))
+        return False
+    return True
 
 
 def read_events(since):
     out = []
     try:
-        with open(os.path.join(sync.cache_dir(), "usage.jsonl"), encoding="utf-8") as f:
+        with open(os.path.join(sync.cache_dir(), "usage.jsonl"), encoding="utf-8", errors="replace") as f:
             for line in f:
                 try:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(ev, dict) and ev.get("ts", 0) >= since:
-                    out.append(ev)
+                if not isinstance(ev, dict):
+                    continue
+                ts = ev.get("ts", 0)
+                if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= since:
+                    out.append(ev)  # a ts that is not a number is a damaged line: skipped
     except OSError:
         pass
     return out
@@ -176,7 +229,7 @@ def open_project(rows, r):
     (outcome, notice): "iterm"/"tab" keep proj open, "inline" means it ran here, None
     opened nothing."""
     name = "%s:%s" % (r["host"], os.path.basename(r["path"].rstrip("/")))
-    if sync.zellij_in_scope(r):
+    if config.zellij_in_scope(r):
         paths = [x["path"] for x in rows if x["host"] == r["host"]]
         live = agent.zellij_by_project(paths).get(r["path"], [])
         if len(live) > 1:
@@ -190,11 +243,18 @@ def open_project(rows, r):
             if here:  # zellij cannot switch a client to another session from the CLI
                 where = "this session" if s == here else "zellij session %s" % s
                 return None, "%s is already open in %s: press Ctrl-o w to switch" % (name, where)
+            try:
+                cmd = opener.zellij_attach(s, r["path"])
+            except ValueError:
+                return None, "session name starts with '-', attach to it by hand"
             log_event("open", r["host"], r["path"], attach=s)
-            return opener.open_command(opener.zellij_attach(s, r["path"]), name, iterm=False), None
+            return opener.open_command(cmd, name, iterm=False), None
         if here:
+            try:
+                opener.zellij_new_tab(r["path"], name)
+            except (OSError, subprocess.CalledProcessError) as e:
+                return None, "zellij new-tab failed: %s" % termtext.one_line(e)
             log_event("open", r["host"], r["path"])
-            opener.zellij_new_tab(r["path"], name)
             return "tab", "opened %s in a new zellij tab" % name
         if not os.environ.get("ZELLIJ"):
             return create_session(r, name), None
@@ -208,7 +268,7 @@ def create_session(r, title):
     sessions = agent.zellij_session_list()
     if sessions is None:
         return launch(r, r["path"])
-    name = opener.proj_session_name(ui.project_name(r))
+    name = opener.proj_session_name(ui.project_name(r), r["path"], r.get("home"))
     state = opener.session_state(sessions, name)
     if state == "live":  # proj's own session whose processes are not in this project
         log_event("open", r["host"], r["path"], attach=name)
@@ -217,7 +277,7 @@ def create_session(r, title):
     try:
         cmd = opener.zellij_new_session(r["path"], name, layout_dir, state == "exited")
     except (OSError, ValueError) as e:
-        print("cannot write the zellij layout, running here instead: %s" % ui._one_line(e),
+        print("cannot write the zellij layout, running here instead: %s" % termtext.one_line(e),
               file=sys.stderr)
         return launch(r, r["path"])
     extra = {"replaced_exited": True} if state == "exited" else {}
@@ -240,7 +300,8 @@ def cmd_browse(cfg, args):
         try:
             bd = board.build(caches, fresh_lives(cfg, now), cfg, now)
             notice = "; ".join(x for x in [notice] + take_notices() if x) or None
-            key, host, path = ui.pick_project(rows, now, notice, last, board=bd)
+            key, host, path = ui.pick_project(rows, now, termtext.one_line(notice) if notice else None,
+                                              last, board=bd)
         except ui.Cancelled:
             return 0
         notice, last = None, (host, path)
@@ -280,7 +341,10 @@ def cmd_browse(cfg, args):
             continue  # (a host header line has no path)
         name = "%s:%s" % (host, os.path.basename(path.rstrip("/")))
         if key == "ctrl-x":
-            notice = clean(cfg, host, path)
+            try:
+                notice = clean(cfg, host, path)
+            except (sync.AgentError, ValueError) as e:
+                notice = "clean failed: %s" % termtext.one_line(e)
             continue
         if key == "ctrl-f":
             session = next(s for s in r["sessions"] if s["id"] == sid)
@@ -351,6 +415,8 @@ def cmd_grep(cfg, args):
 
 
 def cmd_sync(cfg, args):
+    for name in args.hosts or ():
+        config.host_by_name(cfg, name)  # unknown name: ValueError, exit 2
     status = sync.sync_all(cfg, args.hosts or None, live_only=args.live)
     if not args.quiet:
         print_sync(status)
@@ -363,6 +429,9 @@ def cmd_report(cfg, args):
     caches = sync.load_caches(cfg)
     lives = sync.load_lives(cfg)
     bd = board.build(caches, lives, cfg, now)  # cache only: no fresh_lives, no zellij
+    problem = usage_log_problem()
+    if problem:
+        print("usage log is not being written (%s); stats below may be stale" % problem)
     sys.stdout.write(report.render(model.rows(caches, cfg, now), caches, now,
                                    events=read_events(now - report.USAGE_DAYS * 86400), board=bd, lives=lives, cfg=cfg))
     return 0
@@ -377,7 +446,7 @@ def clean(cfg, host_name, path):
     listing = sync.run_agent(host, {"action": "list", "path": path,
                                     "patterns": cfg["suspicious_patterns"]}, cfg["ssh_timeout"])
     if not listing["files"]:
-        msg = "no untracked files in %s:%s" % (host_name, ui._one_line(path))
+        msg = "no untracked files in %s:%s" % (host_name, termtext.one_line(path))
         print(msg)
         return msg
     try:
@@ -386,7 +455,7 @@ def clean(cfg, host_name, path):
         return "clean cancelled"
     if not chosen:
         return "clean: nothing selected"
-    print("\n".join("  " + ui._one_line(c) for c in chosen))
+    print("\n".join("  " + termtext.one_line(c) for c in chosen))
     if _ask("move %d file(s) to %s on %s? [y/N] " % (len(chosen), cfg["trash_dir"], host_name)) \
             .strip().lower() != "y":
         return "clean cancelled"
@@ -394,11 +463,11 @@ def clean(cfg, host_name, path):
                                 "trash_dir": cfg["trash_dir"]}, cfg["ssh_timeout"])
     log_event("clean", host_name, path, moved=len(res["moved"]))
     msg = "moved %d, skipped %d%s" % (len(res["moved"]), len(res["skipped"]),
-                                      ("  (batch %s; undo: proj restore)" % ui._one_line(res["batch"]))
+                                      ("  (batch %s; undo: proj restore)" % termtext.one_line(res["batch"]))
                                       if res["batch"] else "")
     print(msg)
     for s in res["skipped"]:
-        print("  skipped (no longer untracked or unsafe): %s" % ui._one_line(s))
+        print("  skipped (no longer untracked or unsafe): %s" % termtext.one_line(s))
     return msg
 
 
@@ -412,69 +481,84 @@ def cmd_clean(cfg, args):
 
 def _all_batches(cfg, host_name):
     hosts = [config.host_by_name(cfg, host_name)] if host_name else cfg["hosts"]
-    out = []
+    out, failed = [], []
     for h in hosts:
         try:
             res = sync.run_agent(h, {"action": "batches", "trash_dir": cfg["trash_dir"]},
                                  cfg["ssh_timeout"])
         except sync.AgentError as e:
-            print("%s: %s" % (h["name"], ui._one_line(e)), file=sys.stderr)
+            print("%s: %s" % (h["name"], termtext.one_line(e)), file=sys.stderr)
+            failed.append((h["name"], e))
             continue
         out.extend((h, b) for b in res["batches"])
-    return out
+    return out, failed
 
 
 def _batch_text(h, b):
     """What a batch looks like on screen: every external part cleaned."""
-    return "%s  %s  %s  %d file(s)  %s" % (ui._one_line(h["name"]), ui._one_line(b["id"]),
+    return "%s  %s  %s  %d file(s)  %s" % (termtext.one_line(h["name"]), termtext.one_line(b["id"]),
                                            ui.fmt_time(b["created"]), b["count"],
-                                           ui._one_line(b["project"]))
+                                           termtext.one_line(b["project"]))
 
 
 def _batch_line(h, b):
     """Picker line: host and batch id exactly as the agent gave them (restore sends the id
     back, and cleaning would change a name with double spaces or ESC), then the shown text."""
-    return "%s\t%s\t%s" % (h["name"], b["id"], _batch_text(h, b))
+    return "%s\t%s\t%s" % (h["name"], ui.to_field(b["id"]), _batch_text(h, b))
 
 
 def cmd_restore(cfg, args):
-    batches = _all_batches(cfg, args.host)
+    batches, failed = _all_batches(cfg, args.host)
     if not batches:
+        if failed:
+            print("cannot read the trash on: %s" % ", ".join(termtext.one_line(n) for n, _ in failed),
+                  file=sys.stderr)
+            return 1
         print("trash is empty")
         return 0
+    if failed:
+        print("list incomplete: %d host(s) could not be read" % len(failed), file=sys.stderr)
     try:
         line = ui.pick_line([_batch_line(h, b) for h, b in batches], "pick a batch to restore",
                             shown_fields="3..")
     except ui.Cancelled:
         return 0
     host_name, batch_id = line.split("\t")[:2]
+    batch_id = ui.from_field(batch_id)
     res = sync.run_agent(config.host_by_name(cfg, host_name),
                          {"action": "restore", "batch": batch_id, "trash_dir": cfg["trash_dir"]},
                          cfg["ssh_timeout"])
     log_event("restore", host_name, batch_id, restored=len(res["restored"]))
     print("restored %d, skipped %d" % (len(res["restored"]), len(res["skipped"])))
     for s in res["skipped"]:
-        print("  skipped (path exists or trash copy missing): %s" % ui._one_line(s))
+        print("  skipped (path exists or trash copy missing): %s" % termtext.one_line(s))
     return 0
 
 
 def _days(spec):
     spec = spec.strip().lower()
-    days = float(spec[:-1]) if spec.endswith("d") else float(spec)
-    if days <= 0:
+    try:
+        days = float(spec[:-1]) if spec.endswith("d") else float(spec)
+    except ValueError:
+        raise SystemExit("--older must be a number of days such as 30d, got %r" % spec)
+    if not config.positive_number(days):
         raise SystemExit("--older must be > 0")
     return days
 
 
 def cmd_trash(cfg, args):
-    batches = _all_batches(cfg, args.host)
+    batches, failed = _all_batches(cfg, args.host)
     if not args.purge:
         for h, b in batches:
             print(_batch_text(h, b))
-        return 0
+        return 1 if failed else 0
     cutoff = time.time() - _days(args.older) * 86400
     old = [(h, b) for h, b in batches if b["created"] < cutoff]
     if not old:
+        if failed:
+            print("no older batches on the hosts that could be read; %d host(s) failed"
+                  % len(failed))
+            return 1
         print("nothing older than %s" % args.older)
         return 0
     for h, b in old:
@@ -483,27 +567,29 @@ def cmd_trash(cfg, args):
     if _ask("type yes to confirm: ").strip() != "yes":
         return 0
     hosts = {h["name"]: h for h, _ in old}
+    failures = len(failed)
     for name, h in hosts.items():
         ids = [b["id"] for h2, b in old if h2["name"] == name]
-        res = sync.run_agent(h, {"action": "purge", "ids": ids,
-                                 "trash_dir": cfg["trash_dir"]}, cfg["ssh_timeout"])
+        try:
+            res = sync.run_agent(h, {"action": "purge", "ids": ids,
+                                     "trash_dir": cfg["trash_dir"]}, cfg["ssh_timeout"])
+        except sync.AgentError as e:
+            print("%s: purge failed: %s" % (termtext.one_line(name), termtext.one_line(e)), file=sys.stderr)
+            failures += 1
+            continue
         print("%s: purged %d" % (name, len(res["purged"])))
-    return 0
+    return 1 if failures else 0
 
 
 def cmd_preview(cfg, args):
     now = time.time()
-    host, path = args.host.rstrip("\t"), args.path.rstrip("\t")
+    host, path = args.host.rstrip("\t"), ui.from_field(args.path.rstrip("\t"))
     caches = sync.load_caches(cfg)
     if not path:
         print(ui.host_preview_text(host, caches, model.rows(caches, cfg, now), now))
         return 0
     rows = model.rows(caches, cfg, now)
-    r = model.find_row(rows, host, path)
-    fresh, stale = ui._speakers(board.build(caches, sync.load_lives(cfg), cfg, now))
-    live = fresh.get((host, path)) or stale.get((host, path))
-    if r is None and live:
-        r = ui._minimal_row(host, path, live, now)
+    r, live = ui.preview_target(board.build(caches, sync.load_lives(cfg), cfg, now), rows, host, path, now)
     print(ui.preview_text(r, now, live) if r else "(not in cache)")
     return 0
 
@@ -511,6 +597,7 @@ def cmd_preview(cfg, args):
 def cmd_bpreview(cfg, args):
     now = time.time()
     host, path, idx = (a.rstrip("\t") for a in (args.host, args.path, args.idx))
+    path = ui.from_field(path)
     caches = sync.load_caches(cfg)
     r = model.find_row(model.rows(caches, cfg, now), host, path)
     print(ui.backlog_preview_text(r, idx) if r else "(not in cache)")
@@ -520,6 +607,7 @@ def cmd_bpreview(cfg, args):
 def cmd_spreview(cfg, args):
     now = time.time()
     host, path, sid = (a.rstrip("\t") for a in (args.host, args.path, args.sid))
+    path, sid = ui.from_field(path), ui.from_field(sid)
     r = model.find_row(model.rows(sync.load_caches(cfg), cfg, now), host, path)
     s = next((s for s in r["sessions"] if s["id"] == sid), None) if r else None
     print(ui.session_preview_text(r, s, now, args.prompt.rstrip("\t")) if s else "(not in cache)")
@@ -532,7 +620,15 @@ PREVIEW_BYTES = 8192
 def _show(data, size_hint=None):
     if b"\0" in data[:PREVIEW_BYTES]:
         return "(binary file%s)" % ("" if size_hint is None else ", %d bytes" % size_hint)
-    return data[:PREVIEW_BYTES].decode("utf-8", "replace")
+    return termtext.safe(data[:PREVIEW_BYTES].decode("utf-8", "replace"))
+
+
+def remote_preview_script(full):
+    """sh script that prints a directory listing (ls -q: control characters, newlines
+    included, come out as '?') or the head of a file."""
+    p = shlex.quote(full)
+    return "if [ -d %s ]; then ls -Aq %s | head -200; else head -c %d %s; fi" % (
+        p, p, PREVIEW_BYTES, p)
 
 
 def file_preview(host, full):
@@ -540,12 +636,10 @@ def file_preview(host, full):
     if host.get("local"):
         if os.path.isdir(full):
             names = sorted(os.listdir(full))
-            return "\n".join(names[:200]) + ("\n…" if len(names) > 200 else "")
+            return "\n".join(termtext.one_line(n) for n in names[:200]) + ("\n…" if len(names) > 200 else "")
         with open(full, "rb") as f:
             return _show(f.read(PREVIEW_BYTES), os.fstat(f.fileno()).st_size)
-    p = shlex.quote(full)
-    script = "if [ -d %s ]; then ls -A %s | head -200; else head -c %d %s; fi" % (
-        p, p, PREVIEW_BYTES, p)
+    script = remote_preview_script(full)
     r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host["ssh"], script],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
     return _show(r.stdout)
@@ -554,9 +648,9 @@ def file_preview(host, full):
 def cmd_fpreview(cfg, args):
     try:
         print(file_preview(config.host_by_name(cfg, args.host),
-                           os.path.join(args.root, args.rel.rstrip("\t"))), end="")
+                           os.path.join(args.root, ui.from_field(args.rel.rstrip("\t")))), end="")
     except (OSError, subprocess.SubprocessError) as e:
-        print("(cannot preview: %s)" % ui._one_line(e))
+        print("(cannot preview: %s)" % termtext.one_line(e))
     return 0
 
 
@@ -611,5 +705,7 @@ def main(argv=None):
         cfg = config.load_config()
         return COMMANDS[args.cmd](cfg, args)
     except (ValueError, sync.AgentError) as e:
-        print("proj: %s" % ui._one_line(e), file=sys.stderr)
+        print("proj: %s" % termtext.one_line(e), file=sys.stderr)
         return 2
+    finally:
+        flush_notices()  # whatever is still queued: no command that ends here shows the fzf header

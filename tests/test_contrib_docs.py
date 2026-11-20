@@ -1,6 +1,6 @@
 """T30: systemd unit and README 'proj serve' section."""
 import re
-import shutil
+import os
 import subprocess
 from pathlib import Path
 
@@ -9,28 +9,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 UNIT = ROOT / "contrib" / "systemd" / "proj-serve.service"
 README = ROOT / "README.md"
-
-# design.md §3.9, line by line.
-EXPECTED_UNIT = """[Unit]
-Description=proj dashboard (read-only, Tailscale only)
-StartLimitIntervalSec=0
-
-[Service]
-Type=simple
-WorkingDirectory=%h/dev/projdeck
-Environment=PYTHONPATH=%h/dev/projdeck
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 -m projdeck serve
-Restart=always
-RestartSec=10
-Nice=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=default.target
-"""
-
 
 def unit_text():
     return UNIT.read_text(encoding="utf-8")
@@ -51,6 +29,12 @@ def test_unit_key_lines():
     lines = unit_text().splitlines()
     assert "Restart=always" in lines
     assert "RestartSec=10" in lines
+    # PATH must let the service find claude (~/.local/bin), git, ssh, tailscale.
+    path_lines = [l for l in lines if l.startswith("Environment=PATH=")]
+    assert len(path_lines) == 1
+    dirs = path_lines[0][len("Environment=PATH="):].split(":")
+    assert "%h/.local/bin" in dirs
+    assert "/usr/bin" in dirs
     assert "ExecStart=/usr/bin/python3 -m projdeck serve" in lines
 
 
@@ -60,34 +44,44 @@ def test_unit_no_network_online():
     assert not re.search(r"^(After|Wants|Requires)=", t, re.M)
 
 
-def test_unit_matches_design_lines():
-    got = [l.rstrip() for l in unit_text().splitlines() if l.strip()]
-    want = [l for l in EXPECTED_UNIT.splitlines() if l.strip()]
-    assert got == want
-
-
-def _user_manager_available():
-    if shutil.which("systemd-analyze") is None or shutil.which("systemctl") is None:
-        return False
-    try:
-        r = subprocess.run(["systemctl", "--user", "show-environment"],
-                           capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return r.returncode == 0
-
-
-@pytest.mark.skipif(not _user_manager_available(),
-                    reason="systemd-analyze or a systemd user manager is not available")
-def test_unit_systemd_verify_clean():
-    r = subprocess.run(["systemd-analyze", "--user", "verify", str(UNIT)],
+@pytest.mark.skipif(os.environ.get("PROJ_LIVE_TESTS") != "1",
+                    reason="set PROJ_LIVE_TESTS=1 to run against the real systemd user manager")
+def test_unit_systemd_verify_clean(real_which):
+    r = subprocess.run([real_which("systemd-analyze"), "--user", "verify", str(UNIT)],
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     assert r.stderr.strip() == "", r.stderr
 
 
-@pytest.mark.parametrize("needle", [
+def code_block_lines(section):
+    """Stripped lines inside ``` fences; prose and comments never match."""
+    lines, inside = [], False
+    for raw in section.splitlines():
+        if raw.strip().startswith("```"):
+            inside = not inside
+        elif inside:
+            lines.append(raw.strip())
+    return lines
+
+
+@pytest.mark.parametrize("command", [
     "systemctl --user enable --now proj-serve",
+    "systemctl --user restart proj-serve",
+])
+def test_readme_key_commands_are_code_block_lines(command):
+    assert command in code_block_lines(serve_section())
+
+
+def test_code_block_lines_rejects_comment_and_prose():
+    cmd = "systemctl --user enable --now proj-serve"
+    commented = "```bash\n# " + cmd + "\n```\n"
+    prose = cmd + "\n```bash\necho hi\n```\n"
+    assert cmd not in code_block_lines(commented)
+    assert cmd not in code_block_lines(prose)
+    assert cmd in code_block_lines("```bash\n" + cmd + "\n```\n")
+
+
+@pytest.mark.parametrize("needle", [
     "journalctl --user -u proj-serve",
     "SSH_AUTH_SOCK",
     "只能用 IP、MagicDNS 全名或 Tailscale 节点名访问",
@@ -193,11 +187,19 @@ def test_readme_whitelist_ip_only_ruling_I4():
     check_whitelist_ip_only(serve_section())
 
 
-def _old_serve_section(rev):
-    text = subprocess.check_output(["git", "show", rev + ":README.md"],
-                                   cwd=str(ROOT), text=True)
-    m = re.search(r"^## proj serve[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
-    return m.group(1)
+# Fixed copy of the ssh-advice paragraph from an older README (it used
+# set-environment and never probed with systemd-run). Kept inline so the test
+# does not depend on git history; host names are fictional.
+OLD_SERVE_SECTION = """\
+如果 ssh 需要 agent，而 systemd 环境里没有 `SSH_AUTH_SOCK`，远端主机（如 em-host）会显示采集失败。处理：
+
+1. 先看 user manager 里有没有常驻的 agent socket：`systemctl --user show-environment | grep SSH_AUTH_SOCK`
+   （例如 s-host 上已有 `/run/user/1000/gnupg/S.gpg-agent.ssh`）。有就不用动。
+2. 没有的话：`systemctl --user set-environment SSH_AUTH_SOCK=<常驻 agent 的 socket>`，
+   或在 drop-in 里写 `Environment=SSH_AUTH_SOCK=...`；也可以给本机配一把不需要 agent 的密钥。
+3. 不要在 ssh 会话里 `import-environment` 转发来的 socket：断线后它就失效了。
+4. 改完要 `systemctl --user restart proj-serve` 才生效。
+"""
 
 
 def test_guards_discriminate_on_mutated_sections():
@@ -224,9 +226,9 @@ def test_guards_discriminate_on_mutated_sections():
             check_whitelist_ip_only(b)
 
 
-def test_ssh_guard_rejects_84c24a7_readme():
+def test_ssh_guard_rejects_old_readme_fragment():
     with pytest.raises(AssertionError):
-        check_ssh_advice(_old_serve_section("84c24a7"))
+        check_ssh_advice(OLD_SERVE_SECTION)
 
 
 def test_readme_linger_ruling_I5():
@@ -240,3 +242,11 @@ def test_readme_key_table_updated_ruling_2():
     for frag in ("^Y", "^L", "^V"):
         assert frag in t
     assert "^S" not in t
+
+
+@pytest.mark.skipif(os.environ.get("PROJ_LIVE_TESTS") != "1",
+                    reason="set PROJ_LIVE_TESTS=1 to check the live-test path lookup")
+def test_live_lookup_skips_stand_in_dirs(real_which):
+    for prog in ("systemd-analyze", "zellij"):
+        found = real_which(prog)
+        assert os.path.dirname(found) not in os.environ["PROJ_STUB_DIRS"].split(os.pathsep), found

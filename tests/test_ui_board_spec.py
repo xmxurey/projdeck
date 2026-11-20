@@ -408,11 +408,13 @@ def test_fresh_host_has_no_warning():
     assert all("⚠" not in plain(d) for _, _, d in lines)
 
 
-def test_local_host_never_stale():
+def test_local_host_goes_stale_too():
     rows = [row(host="loc", path="/srv/l")]
     b = mkboard([live("loc", [sess("a", "waiting", "/srv/l")], NOW - 5000)])
     lines = lines_of(rows, b)
-    assert find(lines, "/srv/l")[0] > hdr(lines, "── ◆ 等你 ──")
+    assert all("◆ 等你" not in plain(d) for _, _, d in lines)
+    idx = find(lines, "/srv/l")  # the project is still listed, with the stale warning
+    assert len(idx) == 1 and "⚠ live 数据" in plain(lines[idx[0]][2])
 
 
 # ---------------------------------------------------------------- board=None unchanged / None handling

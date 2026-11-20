@@ -113,11 +113,11 @@ def test_remote_stale_host_goes_to_stale_host_sessions():
     assert [w["session_id"] for w in doc["waiting"]] == ["lw"]
 
 
-def test_local_host_is_never_host_stale():
+def test_local_host_goes_stale_too():
     loc = live("a", [sess("lw", "waiting")], at=NOW - 5000)
     b = board.build([cache("a")], [loc], cfg("a"), NOW)
-    assert [s["id"] for s in b["waiting"]] == ["lw"]
-    assert b["stale_host_sessions"] == []
+    assert b["waiting"] == []
+    assert [(s["id"], s["age"]) for s in b["stale_host_sessions"]] == [("lw", 5000)]
 
 
 def test_statusline_doc_shape_and_order():
@@ -141,7 +141,8 @@ def test_hosts_entries():
     assert [h["name"] for h in hosts] == ["a", "r"]
     for h in hosts:
         assert set(h) == {"name", "live_at", "collect_at", "stale_since", "error", "source",
-                          "local", "errors", "live_unknown", "zellij_checked"}  # F3
+                          "local", "errors", "live_unknown", "zellij_checked",
+                          "live_synced_at", "freshness"}  # F3
     assert hosts[0]["live_at"] == NOW - 10 and hosts[0]["collect_at"] == NOW - 100
     assert hosts[0]["source"] == "claude agents"
     assert hosts[1]["live_at"] is None and hosts[1]["error"] == "boom"

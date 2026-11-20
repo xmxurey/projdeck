@@ -36,6 +36,7 @@ def proj(name, **kw):
 
 
 def build(projects, sessions=(), **lvkw):
+    lvkw.setdefault("at", NOW - 10)  # fresh: a local host's stale live data is not trusted
     lv = live("a", list(sessions), **lvkw)
     return board.build([cache("a", projects)], [lv], cfg("a"), NOW)
 

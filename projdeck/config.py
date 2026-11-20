@@ -26,7 +26,9 @@ DEFAULTS = {
 }
 
 
-MUX_VALUES = ("zellij", "tmux", False)
+def valid_mux(v):
+    """A "mux" value: "zellij", "tmux" or false (type first: 0 is not false)."""
+    return v is False or v in ("zellij", "tmux")
 
 
 def resolve_mux(h, platform=None):
@@ -34,13 +36,18 @@ def resolve_mux(h, platform=None):
     zellij works on local Linux hosts only (it is found through /proc)."""
     platform = platform or sys.platform
     mux = h["mux"] if "mux" in h else ("tmux" if h.get("tmux", True) else False)
-    if mux not in MUX_VALUES:
-        raise ValueError('host %r: "mux" must be "zellij", "tmux" or false' % h.get("name"))
+    if not valid_mux(mux):
+        raise ValueError('"mux" must be "zellij", "tmux" or false')
     if mux == "zellij" and not h.get("local"):
         return False, 'host %s: "mux": "zellij" works on the local host only; using a plain shell' % h["name"]
     if mux == "zellij" and not platform.startswith("linux"):
         return False, 'host %s: "mux": "zellij" needs Linux (/proc); using a plain shell' % h["name"]
     return mux, None
+
+
+def zellij_in_scope(host):
+    """Only a local host that runs zellij has its zellij sessions collected."""
+    return bool(host.get("local") and host.get("mux") == "zellij")
 
 
 def valid_port(port):
@@ -67,12 +74,64 @@ def check_serve(s, path):
                          % (path, s["push_statusline"]))
 
 
+def positive_number(v):
+    """A positive, finite number (bools are not numbers here)."""
+    return (not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+            and v > 0)
+
+
 def check_positive(cfg, key, path):
-    """A duration setting: a positive, finite number (bools are not numbers here)."""
+    """A duration setting: a positive, finite number."""
     v = cfg[key]
-    if (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-            or v <= 0):
+    if not positive_number(v):
         raise ValueError('config %s: "%s" must be a positive number, got %r' % (path, key, v))
+
+
+def check_scalars(cfg, path):
+    """scan_depth, include_plain and tiers_days: top-level scalars, so errors may show the value."""
+    depth = cfg["scan_depth"]
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
+        raise ValueError('config %s: "scan_depth" must be an integer >= 1, got %r' % (path, depth))
+    if not isinstance(cfg["include_plain"], bool):
+        raise ValueError('config %s: "include_plain" must be true or false, got %r'
+                         % (path, cfg["include_plain"]))
+    t = cfg["tiers_days"]
+    for k in ("active", "stale"):
+        v = t[k]
+        if not positive_number(v):
+            raise ValueError('config %s: "tiers_days.%s" must be a positive number, got %r'
+                             % (path, k, v))
+    if t["active"] >= t["stale"]:
+        raise ValueError('config %s: "tiers_days.active" must be less than "tiers_days.stale", '
+                         'got %r and %r' % (path, t["active"], t["stale"]))
+
+
+def check_host(h, i, path):
+    """One entry of "hosts". Errors name hosts[i].key only: host values (ssh aliases, paths,
+    host names) are private and never echoed."""
+    def bad(key, what):
+        return ValueError("config %s: hosts[%d].%s must be %s" % (path, i, key, what))
+    if not isinstance(h, dict):
+        raise ValueError("config %s: hosts[%d] must be an object" % (path, i))
+    name = h.get("name")
+    if (not isinstance(name, str) or not HOST_NAME_RE.fullmatch(name)
+            or name.startswith(".")):
+        raise bad("name", "letters, digits, '.', '_' or '-', not starting with '.'")
+    if h.get("local") is not None and not isinstance(h["local"], bool):
+        raise bad("local", "true or false")
+    ssh = h.get("ssh")
+    if ssh is not None and (not isinstance(ssh, str) or not ssh or ssh.startswith("-")):
+        raise bad("ssh", "a non-empty string that does not start with '-'")
+    if not (h.get("local") or ssh):
+        raise bad("ssh", 'set (or "local" must be true)')
+    if "roots" in h:
+        r = h["roots"]
+        if not isinstance(r, list) or not r or not all(isinstance(x, str) and x for x in r):
+            raise bad("roots", "a non-empty list of strings")
+    if "tmux" in h and not (isinstance(h["tmux"], bool) or h["tmux"] == "always"):
+        raise bad("tmux", 'true, false or "always"')
+    if "mux" in h and not valid_mux(h["mux"]):
+        raise bad("mux", '"zellij", "tmux" or false')
 
 
 def config_path():
@@ -103,27 +162,22 @@ def load_config(path=None):
         check_positive(cfg, key, path)
     if cfg["dashboard_url"] is not None and not isinstance(cfg["dashboard_url"], str):
         raise ValueError('config %s: "dashboard_url" must be a string or null' % path)
+    check_scalars(cfg, path)
+    if not isinstance(cfg["hosts"], list):
+        raise ValueError('config %s: "hosts" must be a list' % path)
     if not cfg["hosts"]:
         cfg["hosts"] = [{"name": socket.gethostname().split(".")[0], "local": True,
                          "roots": ["~"]}]
     names = set()
-    for h in cfg["hosts"]:
-        if not h.get("name") or not (h.get("local") or h.get("ssh")):
-            raise ValueError('host %r needs a "name" and either "ssh" or "local": true' % h)
+    for i, h in enumerate(cfg["hosts"]):
+        check_host(h, i, path)
         name = h["name"]
-        if (not isinstance(name, str) or not HOST_NAME_RE.fullmatch(name)
-                or name.startswith(".")):
-            raise ValueError("invalid host name %r: use letters, digits, '.', '_' or '-', "
-                             "and do not start with '.'" % (name,))
         if name in names:
-            raise ValueError("duplicate host name %r" % name)
+            raise ValueError("config %s: hosts[%d].name duplicates an earlier host" % (path, i))
         names.add(name)
         h["mux"], warning = resolve_mux(h)
         if warning:
             cfg["warnings"].append(warning)
-        if h.get("ssh") is not None and (not isinstance(h["ssh"], str)
-                                         or h["ssh"].startswith("-")):
-            raise ValueError("invalid ssh alias %r for host %r" % (h["ssh"], name))
     return cfg
 
 

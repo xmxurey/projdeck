@@ -20,8 +20,8 @@ def tx(events, asks=(), pending=None, ask_started=None, **state):
     return {"state": st, "events": [tuple(e) for e in events], "asks": [tuple(a) for a in asks]}
 
 
-def seg(t, now=NOW, since=SINCE, live=False, status="idle", sub=0):
-    out = agent.segments(t, now, since, live, status, sub)
+def seg(t, now=NOW, since=SINCE, live=False, status="idle", sub=0, spans=()):
+    out = agent.segments(t, now, since, live, status, sub, spans)
     out = [list(s) for s in out]
     # invariants shared by every case
     prev_end = None
@@ -56,12 +56,12 @@ def test_h_gap_boundary_180_blank_181_wait():
                       ["busy", T0 + 241, T0 + 250]]
 
 
-def test_p_next_is_sub_any_length():
+def test_p_next_is_sub_where_spans_cover_any_length():
     t = tx([(T0, "H"), (T0 + 60, "C"), (T0 + 560, "P"), (T0 + 600, "C")])
-    assert seg(t) == [["busy", T0, T0 + 60], ["sub", T0 + 60, T0 + 560],
+    assert seg(t, spans=[[T0 + 60, T0 + 560]]) == [["busy", T0, T0 + 60], ["sub", T0 + 60, T0 + 560],
                       ["busy", T0 + 560, T0 + 600]]
     t = tx([(T0, "H"), (T0 + 60, "C"), (T0 + 90, "P"), (T0 + 150, "C")])
-    assert seg(t) == [["busy", T0, T0 + 60], ["sub", T0 + 60, T0 + 90],
+    assert seg(t, spans=[[T0 + 50, T0 + 95]]) == [["busy", T0, T0 + 60], ["sub", T0 + 60, T0 + 90],
                       ["busy", T0 + 90, T0 + 150]]
 
 
@@ -284,7 +284,7 @@ def test_same_kind_gap_61_does_not_merge():
 
 def test_different_kinds_never_merge():
     t = tx([(T0, "H"), (T0 + 60, "C"), (T0 + 90, "P"), (T0 + 150, "C")])
-    assert [s[0] for s in seg(t)] == ["busy", "sub", "busy"]
+    assert [s[0] for s in seg(t, spans=[[T0 + 60, T0 + 90]])] == ["busy", "sub", "busy"]
 
 
 def _many(n):
@@ -312,3 +312,24 @@ def test_400_segments_all_kept_and_401_drops_oldest():
 def test_empty_tx_gives_no_segments():
     assert seg(tx([]), live=False) == []
     assert seg(tx([]), live=True, status="idle") == []
+
+
+def test_p_gap_without_spans_is_wait_not_sub():
+    t = tx([(T0, "H"), (T0 + 60, "C"), (T0 + 10800, "P"), (T0 + 10830, "C")])
+    out = seg(t, now=T0 + 20000)
+    assert not [g for g in out if g[0] == "sub"]
+    assert ["wait", T0 + 60, T0 + 10800] in out
+
+
+def test_p_gap_with_span_splits_sub_and_wait():
+    t = tx([(T0, "H"), (T0 + 60, "C"), (T0 + 10800, "P"), (T0 + 10830, "C")])
+    out = seg(t, now=T0 + 20000, spans=[[T0 + 60, T0 + 600]])
+    assert ["sub", T0 + 60, T0 + 600] in out
+    assert ["wait", T0 + 600, T0 + 10800] in out
+
+
+def test_spans_are_unioned_and_short_leftover_is_dropped():
+    t = tx([(T0, "H"), (T0 + 60, "C"), (T0 + 600, "P"), (T0 + 630, "C")])
+    out = seg(t, spans=[[T0 + 60, T0 + 300], [T0 + 200, T0 + 590]])
+    assert ["sub", T0 + 60, T0 + 590] in out
+    assert not [g for g in out if g[0] == "wait"]

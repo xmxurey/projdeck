@@ -186,7 +186,12 @@ def test_render_mixed_known_and_unknown_hosts():
 
 
 def test_render_proj_prefixed_name_gets_note():
-    _, lines = section(md_of(mk(["proj-foo", "mine"])))
+    # the note needs a project whose current session name is proj-foo
+    b = mk(["proj-foo", "mine"])
+    row = dict(model.ROW_DEFAULTS, host="s-host", path="/home/u/foo", home="/home/u",
+               tier="active", activity=NOW)
+    md = report.render([row], [cache()], NOW, board=b, lives=_LIVES.get(id(b), []), cfg=CFG)
+    _, lines = section(md)
     by = {("proj-foo" in ln): ln for ln in entries(lines)}
     assert "proj 下次在该项目按 Enter 时会自动删除" in by[True]
     assert "自动删除" not in by[False]

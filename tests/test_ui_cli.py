@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 import pytest
 
@@ -169,9 +170,12 @@ def test_cli_clean_restore_purge(tmp_path, monkeypatch, capsys, make_repo):
     with monkeypatch.context() as m:
         m.setattr(cli.time, "time", lambda: real + 40 * 86400)
         assert cli.main(["trash", "--purge", "--older", "30d"]) == 0  # answered "no"
-    assert "1 batch" in capsys.readouterr().out
+    out_lines = capsys.readouterr().out.splitlines()
+    assert "1 batch(es) will be permanently deleted." in out_lines, out_lines
     assert cli.main(["trash"]) == 0
-    assert "p1" in capsys.readouterr().out
+    listing = capsys.readouterr().out.splitlines()
+    assert len(listing) == 1, listing
+    assert re.fullmatch(r"local  \S+  .+  2 file\(s\)  %s" % re.escape(p1), listing[0]), listing
 
 
 def test_cli_purge_yes_deletes_shown_batch(tmp_path, monkeypatch, capsys, make_repo):
@@ -185,7 +189,7 @@ def test_cli_purge_yes_deletes_shown_batch(tmp_path, monkeypatch, capsys, make_r
         m.setattr(cli.time, "time", lambda: real + 40 * 86400)
         m.setattr("builtins.input", lambda prompt="": "yes")
         assert cli.main(["trash", "--purge", "--older", "30d"]) == 0
-    assert "purged 1" in capsys.readouterr().out
+    assert "local: purged 1" in capsys.readouterr().out.splitlines()
     assert cli.main(["trash"]) == 0
     assert capsys.readouterr().out.strip() == ""
 
@@ -511,7 +515,7 @@ def test_live_flag_variants():
     assert ui.PROJECT_HEADER.startswith("Enter: resume")
 
 
-ZROW = dict(local=True, ssh=None, mux="zellij", host="s-host", path="/home/u/quant")
+ZROW = dict(local=True, ssh=None, mux="zellij", host="s-host", path="/home/u/quant", home="/home/u")
 
 
 def _open(monkeypatch, live, env=None, picked=None):

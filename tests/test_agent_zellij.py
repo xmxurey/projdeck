@@ -78,13 +78,14 @@ def test_collect_marks_live_zellij(tmp_path, make_repo, monkeypatch):
 
 
 
-def test_matches_zellij_dump_layout_on_this_machine():
-    # conftest puts a stand-in zellij first on PATH; this test is about the real one
-    stub_dir = os.path.dirname(os.environ["PROJ_STUB_CALLS"])
-    real_path = os.pathsep.join(p for p in os.environ["PATH"].split(os.pathsep) if p != stub_dir)
-    zellij = shutil.which("zellij", path=real_path)
+@pytest.mark.skipif(os.environ.get("PROJ_LIVE_TESTS") != "1",
+                    reason="set PROJ_LIVE_TESTS=1 to run against the real zellij on this machine")
+def test_matches_zellij_dump_layout_on_this_machine(real_which, real_path, monkeypatch):
+    # conftest puts stand-ins first on PATH; this test is about the real zellij
+    zellij = real_which("zellij")
+    monkeypatch.setenv("PATH", real_path)
     live = agent.zellij_sessions()
-    if not live or not zellij:
+    if not live:
         pytest.skip("no live zellij session here")
     for name, cwds, _ in live:
         r = subprocess.run([zellij, "--session", name, "action", "dump-layout"],
@@ -93,3 +94,15 @@ def test_matches_zellij_dump_layout_on_this_machine():
         assert r.returncode == 0, (name, r.returncode)
         for top in re.findall(r'cwd "(/[^"]*)"', r.stdout):
             assert any(c == top or c.startswith(top.rstrip("/") + "/") for c in cwds), (name, top)
+
+
+def test_attach_map_no_command_for_dash_session_name(tmp_path):
+    proc = fake_proc(tmp_path, {
+        10: (1, "zellij", [SERVER, "--server", SOCK + "-evil"], "/"),
+        11: (10, "claude", ["claude"], "/w"),
+        20: (1, "zellij", [SERVER, "--server", SOCK + "proj-ok"], "/"),
+        21: (20, "claude", ["claude"], "/w"),
+    })
+    got = agent.attach_map(proc)
+    assert got[11] == ""
+    assert got[21] == "zellij attach proj-ok"

@@ -198,7 +198,7 @@ def test_success_after_failure_clears_stale(tmp_path, monkeypatch):
 
 def test_collect_and_live_caches_never_collide(tmp_path, monkeypatch):
     monkeypatch.setenv("PROJ_CACHE", str(tmp_path / "cache"))
-    names = ["live", "s-host.live", "statusline"]
+    names = ["statusline", "live", "s-host.live"]  # deliberately not alphabetical
     cfg, _ = make_cfg(tmp_path, [{"name": n, "ssh": n} for n in names])
     FakeRemote(monkeypatch)
     status = sync.sync_all(cfg)
@@ -208,8 +208,8 @@ def test_collect_and_live_caches_never_collide(tmp_path, monkeypatch):
         c, l = sync.read_cache(n), sync.read_live(n)
         assert c["host"] == n and "projects" in c and "sessions" not in c
         assert l["host"] == n and "sessions" in l and "projects" in l and "home" not in l
-    assert [c["host"] for c in sync.load_caches(cfg)] == sorted(names) or \
-        sorted(c["host"] for c in sync.load_caches(cfg)) == sorted(names)
+    # load_caches follows the configured order, it does not sort
+    assert [c["host"] for c in sync.load_caches(cfg)] == names
     assert sorted(l["host"] for l in sync.load_lives(cfg) if l) == sorted(names)
 
 

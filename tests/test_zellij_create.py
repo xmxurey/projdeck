@@ -78,38 +78,48 @@ def open_it(e):
 
 # ---- naming
 
+HOME = "/home/u"
+
+
+def sname(given):
+    """Session name of the project called `given` (relative to HOME) under HOME."""
+    return opener.proj_session_name(given, HOME + "/" + given, HOME)
+
+
 @pytest.mark.parametrize("given,want", [
     ("quant", "proj-quant"),
-    ("dev/process-core", "proj-dev-process-core"),
-    ("", "proj-project"),
     ("a.b_c-d", "proj-a.b_c-d"),
 ])
 def test_names(given, want):
-    assert opener.proj_session_name(given) == want
+    assert sname(given) == want
+
+
+def test_nested_project_name_carries_a_path_hash():
+    assert re.fullmatch(r"proj-dev-process-core-[0-9a-f]{4}", sname("dev/process-core"))
 
 
 def test_name_is_sanitised_bounded_and_stable():
     for given in (".a b/中文", "-x" * 40, "a" * 100, 'q"\\ $(x)'):
-        n = opener.proj_session_name(given)
+        n = sname(given)
         part = n[len("proj-"):]
         assert n.startswith("proj-") and part and len(part) <= 32
         assert set(part) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
         assert part[0] not in ".-"
-        assert opener.proj_session_name(given) == n
+        assert sname(given) == n
 
 
 def test_lossy_names_get_a_short_hash_so_different_projects_do_not_collide():
     pairs = [("dev/a b", "dev/a-b"), ("dev/中文", "dev/日本"),
              ("dev/projdeck/.worktrees/2026-11-18-proj-dashboard-T31",
               "dev/projdeck/.worktrees/2026-11-18-proj-dashboard-T30")]
-    assert re.search(r"-[0-9a-f]{4}$", opener.proj_session_name(pairs[1][1]))
+    assert re.search(r"-[0-9a-f]{4}$", sname(pairs[1][1]))
     for a, b in pairs:
-        na, nb = opener.proj_session_name(a), opener.proj_session_name(b)
+        na, nb = sname(a), sname(b)
         assert na != nb
         assert len(na) - len("proj-") <= 32 and len(nb) - len("proj-") <= 32
         assert re.search(r"-[0-9a-f]{4}$", na)  # the first of each pair is lossy
-    assert opener.proj_session_name("dev/a b") == opener.proj_session_name("dev/a b")
-    assert opener.proj_session_name("dev/a-b") == "proj-dev-a-b"  # lossless: unchanged
+    assert sname("dev/a b") == sname("dev/a b")
+    assert sname("dev-a-b") == "proj-dev-a-b"  # lossless, top level: unchanged
 
 
 # ---- create, replace an exited session
@@ -148,7 +158,7 @@ def test_layout_escapes_quotes_backslashes_and_spaces(env, opened, tmp_path):
     env.row["path"] = str(weird)
     env.set_list("")
     open_it(env)
-    name = opener.proj_session_name(ui.project_name(env.row))
+    name = opener.proj_session_name(ui.project_name(env.row), env.row["path"], env.row["home"])
     text = env.layout(name).read_text()
     assert 'cwd="%s"' % str(weird).replace("\\", "\\\\").replace('"', '\\"') in text
     assert 'exec \\"$SHELL\\" -l' in text
@@ -269,7 +279,7 @@ def test_failing_zellij_command_ends_in_the_picker_here(env, flag, monkeypatch):
     open_it(env)
     subprocess.run(cmds[0], shell=True)
     calls = env.calls()
-    assert calls[-1] == "SHELL -lic claude --resume" or calls[-2:] == ["SHELL -lic claude --resume", "SHELL -l"]
+    assert calls[-2:] == ["SHELL -lic claude --resume", "SHELL -l"]
     if flag == "ZJ_FAIL_DELETE":
         assert not any(c.startswith("--session") for c in calls)
 
@@ -338,7 +348,7 @@ def test_layout_cwd_round_trips_odd_characters(env, opened, tmp_path, dirname):
     env.row["path"] = str(d)
     env.set_list("")
     open_it(env)
-    text = env.layout(opener.proj_session_name(ui.project_name(env.row))).read_text()
+    text = env.layout(opener.proj_session_name(ui.project_name(env.row), env.row["path"], env.row["home"])).read_text()
     lit = re.search(r'cwd=("(?:[^"\\]|\\.)*")', text).group(1)
     assert kdl_unescape(lit) == str(d)
 
@@ -373,7 +383,7 @@ def test_interrupted_layout_write_leaves_no_temp_file(env, monkeypatch, tmp_path
 
 
 def test_layout_and_cache_share_one_atomic_writer():
-    assert opener._write_atomic is sync._write_atomic
+    assert opener.fsutil.write_atomic is sync._write_atomic
 
 
 def test_conftest_guards_stand_in_for_real_zellij_and_ssh(monkeypatch):

@@ -1,7 +1,9 @@
 """F8: one concept, one implementation (top mark, active tier, zellij scope, session title)."""
 import json
 
-from projdeck import agent, board, cli, web
+import pytest
+
+from projdeck import agent, board, cli, report, sync, web
 from tests.test_agent_transcript import asst, human, line, text
 from tests.test_ui_cli import _open
 
@@ -55,10 +57,10 @@ def test_deleted_projects_get_no_tile():
     assert tiles([gone]) == set()
 
 
-# ---- cli asks sync.zellij_in_scope
+# ---- cli asks config.zellij_in_scope
 
 def test_enter_follows_the_shared_zellij_scope(monkeypatch):
-    monkeypatch.setattr(cli.sync, "zellij_in_scope", lambda r: False)
+    monkeypatch.setattr(cli.config, "zellij_in_scope", lambda r: False)
     out, calls = _open(monkeypatch, [{"name": "research", "claude": 2}])
     assert calls["launch"] == ["/home/u/quant"] and calls["open"] == []
 
@@ -85,3 +87,10 @@ def test_custom_and_ai_titles_rank_the_same_in_both(tmp_path):
     assert agent.parse_session(str(fp))["title"] == "Mine"
     assert agent.session_title(None, "AI", "x") == "AI"
     assert agent.session_title(None, None, None) == "(untitled)"
+
+
+@pytest.mark.parametrize("mod", [board, report, cli, sync], ids=lambda m: m.__name__)
+def test_only_config_exposes_zellij_in_scope(mod):
+    # a stub aimed at <mod>.zellij_in_scope must fail loudly (AttributeError), not sit idle;
+    # every caller goes through the config module attribute
+    assert not hasattr(mod, "zellij_in_scope")

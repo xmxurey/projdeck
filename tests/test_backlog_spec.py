@@ -256,7 +256,8 @@ def test_read_backlog_non_utf8_does_not_crash(tmp_path):
     p.mkdir()
     (p / "backlog.md").write_bytes(b"- **ok**\n- bad \xff\xfe bytes\n")
     b = agent.read_backlog(str(tmp_path))
-    assert b is None or len(b["items"]) >= 1
+    assert b is not None
+    assert "ok" in [i["title"] for i in b["items"]]
 
 
 # ---- collect ----

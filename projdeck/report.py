@@ -2,9 +2,9 @@
 import re
 import time
 
-from projdeck import sync
-from projdeck.board import UNSAFE_NAME  # noqa: F401 (also shown by the web page)
-from projdeck.model import human_age, n_suspicious, sync_age
+from projdeck import config, opener, ui
+from projdeck.board import UNSAFE_NAME
+from projdeck.model import git_errors, git_failed, human_age, n_suspicious, sync_age
 from projdeck.termtext import has_control, safe
 
 
@@ -49,11 +49,13 @@ def _plain(text):
     return safe(text).replace("\n", " ").replace("`", "'")
 
 
-def _exited_section(board, lives, cfg, now):
+def _exited_section(board, lives, cfg, now, rows):
     """Exited zellij sessions, with the age of each zellij host's live data. Only hosts whose
-    zellij is collected (sync.zellij_in_scope) are listed. No live data is not the same as none:
-    such a host is named as unknown, and when every one is unknown the count is (?)."""
-    hosts = [h for h in (cfg or {}).get("hosts") or () if sync.zellij_in_scope(h)]
+    zellij is collected (config.zellij_in_scope) are listed. No live data is not the same as none:
+    such a host is named as unknown, and when every one is unknown the count is (?).
+    A session gets PROJ_NOTE only when its name is the current session name (opener) of one of
+    that host's projects in `rows`."""
+    hosts = [h for h in (cfg or {}).get("hosts") or () if config.zellij_in_scope(h)]
     by = {(lv or {}).get("host"): lv for lv in lives or ()}
     data = {h["name"]: by.get(h["name"]) or {} for h in hosts}
     known = {n for n, lv in data.items() if lv.get("zellij_exited") is not None}
@@ -63,16 +65,20 @@ def _exited_section(board, lives, cfg, now):
         return ["", "## Exited zellij sessions (0)", "", "- none (no zellij hosts)"]
     lines = []
     for h in hosts:
-        at = data[h["name"]].get("collected_at")
+        at = data[h["name"]].get("synced_at") or data[h["name"]].get("collected_at")
         lines.append("- %s: %s" % (_plain(h["name"]),
                                    "live data %s ago" % human_age(now - at) if at else "no live data"))
+    current = {}
+    for r in rows or ():
+        current.setdefault(r["host"], set()).add(
+            opener.proj_session_name(ui.project_name(r), r["path"], r.get("home")))
     for e in exited:
         name, cmd, host = e.get("name"), e.get("cmd"), _plain(e.get("host"))
         if name is None or not cmd or has_control(name):
             lines.append("- `%s`: %s" % (host, UNSAFE_NAME))
             continue
         line = "- `%s`: %s" % (host, _code(safe(cmd)))
-        if str(name).startswith("proj-"):
+        if name in current.get(e.get("host"), ()):
             line += " " + PROJ_NOTE
         lines.append(line)
     for h in hosts:
@@ -109,7 +115,10 @@ def render(rows, caches, now, events=None, board=None, lives=None, cfg=None):
                           for r in rows if r["tier"] == "abandoned"])
     section("Deleted (sessions point to missing dirs)",
             ["- %s" % _key(r) for r in rows if r["tier"] == "deleted"])
-    out.extend(_exited_section(board, lives, cfg, now))
+    section("git unreadable", [
+        "- %s %s" % (_key(r), "; ".join(_plain(e) for e in git_errors(r)))
+        for r in rows if r.get("exists", True) and git_failed(r)])
+    out.extend(_exited_section(board, lives, cfg, now, rows))
     if events is not None:
         out.extend(["", "## Your usage, last %d days" % USAGE_DAYS, ""] + _usage(events))
     return "\n".join(out) + "\n"

@@ -4,11 +4,10 @@ import os
 import shlex
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from projdeck import agent
+from projdeck import agent, config, fsutil
 from projdeck.config import collector_request
 
 AGENT_PATH = os.path.abspath(agent.__file__)
@@ -69,22 +68,7 @@ def read_cache(name):
     return _read_json(_cache_path(name))
 
 
-def _write_atomic(path, text):
-    """Atomic text write shared by the cache files and the zellij layout: temp name unique
-    per pid and thread, then os.replace; the temp file never outlives a failure. Text that
-    is not valid unicode (undecoded path bytes) is written back as the original bytes."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
-    try:
-        with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
+_write_atomic = fsutil.write_atomic
 
 
 def _write_json(path, data):
@@ -117,10 +101,10 @@ def claim_marker(name, now=None, problems=None):
     older than MARKER_SECONDS is a leftover: it is removed and claimed again. A permission
     or disk error counts as "not claimed" (False); its text is appended to `problems`."""
     try:
-        os.makedirs(cache_dir(), exist_ok=True)
+        fsutil.makedirs_private(cache_dir())
         for _ in range(2):
             try:
-                os.close(os.open(marker_path(name), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                os.close(os.open(marker_path(name), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
                 return True
             except FileExistsError:
                 if marker_fresh(name, now):
@@ -140,10 +124,6 @@ def release_marker(name):
         os.remove(marker_path(name))
     except OSError:
         pass
-
-
-def live_marker_path():
-    return marker_path(LIVE_MARKER)
 
 
 def live_sync_running(now=None):
@@ -191,14 +171,9 @@ def load_lives(cfg):
     return [c for c in lives if c]
 
 
-def zellij_in_scope(host):
-    """Only a local host that runs zellij has its zellij sessions collected."""
-    return bool(host.get("local") and host.get("mux") == "zellij")
-
-
 def live_request(cfg, host, paths):
     req = {"action": "live", "host": host["name"], "paths": list(paths)}
-    if zellij_in_scope(host):
+    if config.zellij_in_scope(host):
         req["zellij"] = True
     return req
 

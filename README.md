@@ -6,11 +6,21 @@ jump into one in a new iTerm2 tab, and clean stray untracked files reversibly.
 ## Install (Mac)
 
 ```bash
-brew install fzf
+brew install fzf          # needs fzf >= 0.36
 git clone git@github.com:xmxurey/projdeck.git ~/dev/projdeck
 ln -s ~/dev/projdeck/bin/proj /usr/local/bin/proj   # or any dir on PATH
 ```
-Remote hosts need only `python3` and `git` (the agent is piped over ssh).
+Remote hosts need only `python3` (3.8 or newer, the agent is piped over ssh) and `git`.
+The local side is tested on Python 3.12.
+
+On Linux, `sudo apt install fzf` works only if the packaged version is >= 0.36
+(`fzf --version`). Older distro packages (for example the one in Ubuntu 22.04's apt, 0.29)
+are too old; install from the official release instead:
+
+```bash
+git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && ~/.fzf/install --bin
+ln -s ~/.fzf/bin/fzf ~/.local/bin/fzf   # any dir on PATH; or download a binary from the fzf releases page
+```
 
 ## Configure `~/.config/proj/config.json`
 
@@ -22,9 +32,44 @@ Remote hosts need only `python3` and `git` (the agent is piped over ssh).
   ]
 }
 ```
-`ssh` is an alias from `~/.ssh/config` (key auth, `BatchMode`). Optional keys:
-`tiers_days`, `scan_depth`, `include_plain`, `auto_sync_minutes`, `ssh_timeout`,
-`suspicious_patterns`, `trash_dir`, `mux`, `serve`, `dashboard_url` (see "proj serve").
+`ssh` is an alias from `~/.ssh/config` (key auth, `BatchMode`). Optional keys
+(defaults in parentheses):
+
+- `tiers_days` (`{"active": 14, "stale": 90}`): positive, finite numbers (not booleans) with
+  `active < stale`;
+- `scan_depth` (`2`): an integer >= 1 (not a boolean, not `2.0`);
+- `include_plain` (`true`): a boolean;
+- `auto_sync_minutes` (`30`), `ssh_timeout` (`20`, seconds; raise it if many slow
+  repositories make a whole host time out);
+- `trash_dir` (`~/.proj-trash`);
+- `suspicious_patterns`, `serve`, `dashboard_url` (see "proj serve");
+- per host: `roots` (default `["~"]`; a non-empty list of non-empty strings), `tmux`
+  (`true`; `true`, `false` or `"always"`: `true` re-attaches a proj tmux session that is
+  already running, `"always"` creates one when missing, `false` uses a plain shell), `mux`
+  (`"tmux"`; only `"zellij"`, `"tmux"` or `false`), `local` (a boolean), `ssh` (a non-empty
+  alias; required unless `local` is true).
+
+Environment variables: `PROJ_CONFIG` (config file, default `~/.config/proj/config.json`) and
+`PROJ_CACHE` (cache directory, default `~/.cache/proj`).
+
+**Values that do not match the type and value rules above are rejected**, even if they
+used to work through Python truthiness or numeric coercion. In general, any value of the
+wrong type is refused. Examples that used to load and are now errors:
+
+- `roots: []` (used to fall back to `~`), `roots: null`, `hosts: null`;
+- `tmux` other than `true`, `false`, `"always"` (it used to count as true), including `null`;
+- `mux: 0` or `mux: 1` (only `"zellij"`, `"tmux"`, `false` are accepted);
+- `include_plain: 0` or `1`;
+- `scan_depth: 0`, `scan_depth: 2.0`, `scan_depth: "3"`;
+- `tiers_days` with `active >= stale`;
+- a host whose `local` is not a boolean, or whose `ssh` is an empty string.
+
+Any config error makes every subcommand exit with code 2. The message names the key (for
+hosts as `hosts[<i>].<key>`) and never prints the host's values.
+
+`--older` is a command-line argument, not a config key: when it is not a positive, finite
+number of days (for example `abc`, `nan` or `inf`), proj reports an error naming `--older`
+and exits with code 1.
 
 ## Use
 
@@ -33,11 +78,11 @@ Remote hosts need only `python3` and `git` (the agent is piped over ssh).
 | `proj` | all projects; Enter resume (Claude's session picker, or join the project's live zellij session) · ^R resume latest session · ^Y pick session · ^F search prompts · ^X clean · ^U sync · ^L backlog · ^V dashboard |
 | `proj sessions` | search all sessions by title, resume |
 | `proj grep [words]` | search everything you typed to Claude (all hosts), resume that session |
-| `proj sync [host…]` | refresh (auto in background after 30 min) |
+| `proj sync [host…]` | refresh (auto in background after 30 min); `--live` refreshes only the live layer, `--quiet` prints nothing. Names match `hosts[].name` exactly (case-sensitive); an unknown name is an error |
 | `proj report` | markdown: unpushed, no upstream, junk, abandoned, deleted |
 | `proj clean HOST:PATH` | move untracked junk to `~/.proj-trash` (never ignored files) |
 | `proj restore [host]` | put a batch back |
-| `proj trash [--purge --older 30d]` | list / permanently delete old batches |
+| `proj trash [--purge --older 30d] [host]` | list / permanently delete old batches |
 
 `proj` groups projects by host (in config order), newest first within each host. With
 iTerm2 the list stays open after opening a tab, so you can jump between tasks; Esc quits.
@@ -47,17 +92,26 @@ each `## Tag` section's table rows (first cell `` `rel/path/` ``) tag those proj
 the list colors names by tag in muted tones, with a legend in the header. With a registry,
 only registered projects and those with your own sessions are listed. A 🚩 before the path
 (`| 🚩 `quant-poly/` | … |`) flags a project: flagged ones come first within their host. Headless `claude -p`
-runs (cron jobs) and sessions outside home are never listed.
+runs (cron jobs) are never listed. Sessions outside home are listed when they belong to a
+scanned project.
 
 The preview shows where you left off in the latest session (your last prompts and
 Claude's last reply).
 
-Remote projects open inside tmux (`proj-<name>-<hash>` per project, one more per resumed
-session), so claude keeps running when the connection drops; opening again re-attaches.
-`▶n` marks projects with live proj tmux sessions. Detach with `Ctrl-b d`; set
-`"tmux": false` on a host to use a plain shell. Hosts without tmux fall back automatically.
-Local projects open in tmux too when there is no iTerm2 (e.g. proj run over ssh on a Linux
-box); inside tmux proj switches to the project's session instead of nesting.
+Remote projects: by default (`"tmux": true`) Enter re-attaches a proj tmux session
+(`proj-<name>-<hash>` per project, one more per resumed session) only when one is already
+running; otherwise it opens a plain login shell running claude, which ends with the
+connection. Set `"tmux": "always"` on a host to create the session when missing, so claude
+keeps running when the connection drops and opening again re-attaches (this costs memory on
+the host). `"tmux": false` always uses a plain shell. Hosts without tmux fall back to the
+plain shell. `▶name` marks a project with one live zellij session (`▶name·0` when no claude
+runs in it); with several sessions, or any tmux session, it shows `▶n`, the count. Detach
+from tmux with `Ctrl-b d`.
+Local projects follow the same rule when there is no iTerm2 (e.g. proj run over ssh on a
+Linux box): with `"tmux": true` only an already running proj tmux session is joined
+(inside tmux proj switches to it instead of nesting), otherwise a plain shell runs in place;
+`"always"` creates the session when missing. With iTerm2, local projects open in a new tab
+with a plain `cd`.
 
 On a local Linux host with `"mux": "zellij"`, Enter behaves by situation:
 
@@ -66,22 +120,53 @@ On a local Linux host with `"mux": "zellij"`, Enter behaves by situation:
 - not inside zellij, and a live session already works in the project (found by the working
   directories of its processes; names can be anything): Enter joins it;
 - not inside zellij, no live session: Enter creates a session named `proj-<project>`
-  (the project's path relative to home with `/` as `-`, e.g. `dev/process-core` becomes
-  `proj-dev-process-core`; a 4-character hash is appended when the name had to be
-  sanitized or shortened). An exited `proj-` session of the same name is deleted first;
-  a live one is joined;
+  (the project's path relative to home, e.g. `daily` becomes `proj-daily`; a name
+  containing `/` gets a hash, e.g. `proj-dev-process-core-<4-char hash>`). A 4-character
+  hash of the project's absolute path (`proj-<name>-<4-char hash>`)
+  is appended in three cases: the name contains `/`, the project is outside home, or
+  sanitizing or truncating the name dropped characters. An exited `proj-` session of the
+  same name is deleted first; a live one is joined;
 - zellij unavailable: `claude --resume` runs in place.
+
+Upgrading from the older naming rule: an exited `proj-` session made under the old rule may
+be replaced by a new session of the same name and then deleted. That loses nothing, since
+proj never resurrects sessions. A `proj-` session still alive under the old rule may be
+joined by a different new project that now maps to the same name, so quit old `proj-`
+sessions after upgrading. Exited sessions whose name no longer matches any project are not
+deleted automatically; `proj report` lists the delete command for each.
 
 Sessions you named yourself are never deleted or resurrected; exited ones are only listed
 in the board and in `proj report`. `"mux"` is `"zellij"`, `"tmux"` (default) or `false`; the
 older `"tmux"` key still works. Elsewhere Enter also runs `claude --resume` (in the iTerm2 tab, or after
 re-attaching a live proj tmux session on SSH hosts).
 
+Git is read with a 5 second limit per command; a large repository may show as a git read
+failure (`git?` in the list, "git 读取失败" on the dashboard) when git takes longer.
+
 `proj report` ends with a summary of your own usage (opens, resumes, cleans) from the
 local log `~/.cache/proj/usage.jsonl`; nothing leaves the machine.
 
 `proj clean` works on repository roots only (not subdirectories or plain folders).
 On macOS, iTerm2 asks for Automation permission the first time proj opens a tab.
+
+Status line: `contrib/statusline-waiting.sh` defines `proj_waiting_segment <session_id>`,
+which prints a "sessions waiting for you" segment. Source it from your Claude Code
+`statusline.sh` (bash, needs `jq`) and call it with the session id; for example on a host
+you reach as s-host (the clone is in `~/dev/projdeck`):
+
+```bash
+#!/usr/bin/env bash
+input=$(cat)                                  # Claude Code passes JSON on stdin
+sid=$(printf '%s' "$input" | jq -r '.session_id // ""')
+source ~/dev/projdeck/contrib/statusline-waiting.sh
+echo "my status line $(proj_waiting_segment "$sid")"
+```
+
+Point `statusLine.command` in `~/.claude/settings.json` at that script. It reads
+`$PROJ_CACHE/live/statusline.state` (default `~/.cache/proj/live/`), which `proj serve`
+keeps updated locally and pushes to remote hosts (`serve.push_statusline`). It prints
+nothing when the file is missing or broken, or when its timestamp differs from the clock
+by more than 120 seconds, so keep remote clocks synchronized (NTP).
 
 Tip: set `"cleanupPeriodDays": 365` in Claude Code settings, otherwise transcripts older
 than 30 days are deleted and can't be listed.
@@ -158,3 +243,13 @@ systemctl --user daemon-reload
 python3 scripts/update_webkit.py [--from DIR]   # 更新拷贝
 python3 scripts/update_webkit.py --check         # 只校验，不改动
 ```
+
+## Tests
+
+```bash
+python3 -m pytest -q tests
+```
+
+The mutation meta-tests (the `tests/test_*_spec.py` files that break one line in a copy of the
+tree and require a named test to fail) copy the whole tree and start a child pytest each, so
+they are skipped by default; run them with `PROJ_MUTATION_TESTS=1 python3 -m pytest -q tests`.

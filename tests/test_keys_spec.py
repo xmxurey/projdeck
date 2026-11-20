@@ -33,8 +33,9 @@ key, _, pick = script[n].partition("|")
 if key == "-":
     key = ""
 pick = int(pick or 0)
-if n == 0:  # the project row (not the host header line)
-    pick = [i for i, l in enumerate(lines) if "\t/p/a\t" in l][0]
+if n == 0:  # the project row to select (not the host header line); /p/a unless told otherwise
+    want = "\t%s\t" % os.environ.get("FAKE_PICK_PATH", "/p/a")
+    pick = [i for i, l in enumerate(lines) if want in l][0]
 sys.stdout.write(key + "\n" + lines[pick] + "\n")
 """
 
@@ -70,9 +71,13 @@ def browse(tmp_path, monkeypatch):
              "prompts": [], "title": "t", "entrypoint": "cli"},
             {"id": "sess-old", "last_ts": now - 5000, "cwd": "/p/a", "first_prompt": "older",
              "prompts": [], "title": "t", "entrypoint": "cli"}]
+    sess_b = [{"id": "sess-b", "last_ts": now - 9000, "cwd": "/p/b", "first_prompt": "bee",
+               "prompts": [], "title": "t", "entrypoint": "cli"}]
     cache = {"host": host, "synced_at": now, "stale_since": None, "home": "/h", "tags": [],
              "projects": [{"path": "/p/a", "name": "a", "exists": True, "last_mtime": now - 50,
-                           "sessions": sess}]}
+                           "sessions": sess},
+                            {"path": "/p/b", "name": "b", "exists": True, "last_mtime": now - 9000,
+                             "sessions": sess_b}]}
     monkeypatch.setattr(cli, "fresh_caches", lambda cfg_, now_: [cache])
     monkeypatch.setattr(cli, "background_sync", lambda *a, **k: None)
     calls = {"open": [], "launch": []}
@@ -80,12 +85,13 @@ def browse(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "launch",
                         lambda row, path, session=None: (calls["launch"].append(session), "here")[1])
 
-    def run(key, pick2=0):
+    def run(key, pick2=0, pick_path="/p/a"):
         # call 0: the list with `key`; call 1 (only for ctrl-y): the session picker; then Esc
         script = "%s|0" % (key or "-")
         if key == "ctrl-y":
             script += ";-|%d" % pick2
         monkeypatch.setenv("FAKE_SCRIPT", script)
+        monkeypatch.setenv("FAKE_PICK_PATH", pick_path)
         import argparse
         try:
             cli.cmd_browse(cfg, argparse.Namespace(**{k: None for k in
@@ -135,13 +141,15 @@ def test_ctrl_y_first_session(browse):
 def test_unbound_or_pending_keys_do_nothing(browse, key):
     calls = browse(key)
     assert not _acted(calls), calls
-    # whatever is shown next (the relisted overview) is not a session picker
-    for i in (1, 2):
-        f = os.path.join(str(browse.fdir), "call%d" % i)
-        if os.path.exists(f):
-            assert "--expect=" + ",".join(KEYS) in open(f).read().split("\n"), i
+    # the unbound key sends us back to the list: fzf must be called a second time, and what it
+    # shows is the relisted overview, not a session picker
+    f = os.path.join(str(browse.fdir), "call1")
+    assert os.path.exists(f), "no second fzf call after %s" % key
+    assert "--expect=" + ",".join(KEYS) in open(f).read().split("\n")
 
 
-def test_enter_still_opens_project(browse):
-    calls = browse("")
-    assert calls["open"] or calls["launch"]
+@pytest.mark.parametrize("path", ["/p/a", "/p/b"])
+def test_enter_opens_the_selected_project(browse, path):
+    calls = browse("", pick_path=path)
+    assert [r["path"] for r in calls["open"]] == [path], calls
+    assert not calls["launch"]

@@ -6,9 +6,10 @@ import subprocess
 import sys
 import time
 
-from projdeck.board import cells, clip_total
-from projdeck.model import ROW_DEFAULTS, TIER_ICON, human_age, latest_session, n_suspicious, span, sync_age
-from projdeck.termtext import one_line as _one_line, safe as _safe
+from projdeck import paths
+from projdeck.board import cells, clip_total, host_freshness
+from projdeck.model import ROW_DEFAULTS, find_row, TIER_ICON, git_errors, git_failed, human_age, latest_session, n_suspicious, span, sync_age
+from projdeck.termtext import has_surrogates, one_line as _one_line, safe as _safe
 
 SEP = "\t"
 PROJECT_KEYS = ["ctrl-r", "ctrl-y", "ctrl-f", "ctrl-x", "ctrl-u", "ctrl-l", "ctrl-v"]
@@ -26,8 +27,6 @@ RESET = "\x1b[0m"
 DIM = "\x1b[2m"
 YELLOW = "\x1b[33m"
 TL_CELLS, TL_STEP = 24, 450          # 24 cells x 7.5 min = the last 3 hours
-LIVE_STALE_SECONDS = 600             # remote live data older than this does not group a session
-HOST_WARN_SECONDS = 300              # a host header segment turns yellow past this age
 HOST_ERROR_CHARS = 60                # the first live error of a host, cut to this in the header
 EMPTY_CELL = (42, 47, 55)
 CELL_RGB = {"busy": (111, 155, 203), "sub": (169, 198, 228), "wait": (240, 163, 94),
@@ -69,13 +68,37 @@ class Cancelled(Exception):
     pass
 
 
+_UNESCAPABLE_RE = re.compile("[\ud800-\udc7f\udd00-\udfff]")
+HEX_MARK = "hex:"
+
+
+def to_field(text):
+    """A value for a hidden fzf field. fzf rewrites invalid UTF-8 in {n} placeholders, so a
+    value with surrogate characters (non-UTF-8 bytes, surrogateescape) or one that starts
+    with the marker travels as `hex:<hex of its bytes>`, pure ASCII; any other value as is."""
+    text = _UNESCAPABLE_RE.sub("\ufffd", text)
+    if has_surrogates(text) or text.startswith(HEX_MARK):
+        return HEX_MARK + text.encode("utf-8", "surrogateescape").hex()
+    return text
+
+
+def from_field(text):
+    """Inverse of to_field."""
+    if text.startswith(HEX_MARK):
+        try:
+            return bytes.fromhex(text[len(HEX_MARK):]).decode("utf-8", "surrogateescape")
+        except ValueError:
+            pass
+    return text
+
+
 def run_fzf(lines, args, expect=()):
     argv = ["fzf"] + list(args)
     if expect:
         argv.append("--expect=" + ",".join(expect))
     try:
         r = subprocess.run(argv, input="\n".join(lines), stdout=subprocess.PIPE,
-                           encoding="utf-8")
+                           encoding="utf-8", errors="surrogateescape")
     except FileNotFoundError:
         raise SystemExit("fzf is required: brew install fzf")
     if r.returncode in (1, 130):  # 1: no match, 130: aborted (Esc / Ctrl-C)
@@ -112,10 +135,10 @@ def _activity_age(r, now):
 
 def project_name(r):
     """Path relative to the host's home (daily/digest), else the last component."""
-    path, home = r["path"].rstrip("/"), (r.get("home") or "").rstrip("/")
-    if home and path.startswith(home + "/"):
-        return path[len(home) + 1:]
-    return os.path.basename(path) or r["path"]
+    rel = paths.rel_to_home(r["path"], r.get("home"))
+    if rel is not None:
+        return rel
+    return os.path.basename(r["path"].rstrip("/")) or r["path"]
 
 
 def _shown_name(r):
@@ -212,15 +235,18 @@ def project_line(r, now, order=None, show_host=False, live=None):
         flags.append("⚑%d" % n_suspicious(r))
     if r["sessions"]:
         flags.append("💬%d" % len(r["sessions"]))
-    if not r.get("git") and r["exists"] and not r.get("uncollected"):  # uncollected: git unknown
-        flags.append("non-git")
+    if r["exists"] and not r.get("uncollected"):  # uncollected: git unknown
+        if git_failed(r):
+            flags.append("git?")
+        elif not r.get("git"):
+            flags.append("non-git")
     if show_host:
         flags.insert(0, "%s@%s%s" % (DIM, _one_line(r["host"]), RESET))
     if live is None:
         name = _paint("%-28s" % _shown_name(r)[:28], r.get("tag"), order)
         display = "%s %s %5s  %s" % (TIER_ICON[r["tier"]], name, _activity_age(r, now),
                                      " ".join(flags))
-        return SEP.join([r["host"], r["path"], display])
+        return SEP.join([r["host"], to_field(r["path"]), display])
     name = _paint("%-18s" % _shown_name(r)[:18], r.get("tag"), order)
     line = cells(live.get("segments") or [], now - TL_CELLS * TL_STEP, TL_CELLS, TL_STEP)
     tail = []
@@ -233,7 +259,7 @@ def project_line(r, now, order=None, show_host=False, live=None):
         tail.append("☐%d" % open_todos)
     display = "%s %s %5s %s %s  %s" % (_marker(live, r), name, _activity_age(r, now),
                                        spark(line), " ".join(flags), " ".join(t for t in tail if t))
-    return SEP.join([r["host"], r["path"], display.rstrip()])
+    return SEP.join([r["host"], to_field(r["path"]), display.rstrip()])
 
 
 def _header(host, label):
@@ -276,6 +302,18 @@ def _speakers(board):
         if k not in fresh and k not in stale:
             stale[k] = dict(s, age=s.get("age"))  # None stays unknown
     return fresh, stale
+
+
+def preview_target(board, rows, host, path, now):
+    """(row, live) the preview of host:path shows: the cached row (or, for a project only
+    the live data knows, a minimal one) and the session standing for it. (None, None) when
+    nothing knows the project."""
+    fresh, stale = _speakers(board)
+    live = fresh.get((host, path)) or stale.get((host, path))
+    row = find_row(rows, host, path)
+    if row is None and live:
+        row = _minimal_row(host, path, live, now)
+    return row, live
 
 
 def project_lines(rows, now, board=None):
@@ -350,7 +388,11 @@ def header_lines(board, now):
         if errs:
             text += " ⚠ %s%s" % (_one_line(errs[0])[:HOST_ERROR_CHARS],
                                  " 等 %d 条" % len(errs) if len(errs) > 1 else "")
-        if not at or now - at > HOST_WARN_SECONDS or h.get("source") == "none" or errs:
+        err = h.get("error")
+        if err:
+            text += " ⚠ 同步失败：%s" % _one_line(err)[:HOST_ERROR_CHARS]
+        if not at or host_freshness(h, now)["level"] != "fresh" or h.get("source") == "none" \
+                or errs or err:
             text = YELLOW + text + ("" if hinted else " · ^U 刷新") + RESET
             hinted = True
         segs.append(text)
@@ -375,18 +417,18 @@ def session_line(r, s, now):
     display = "%-8s %5s  %-20s %s%s" % (_one_line(r["host"])[:8], human_age(now - s["last_ts"]),
                                         _shown_name(r)[:20], _one_line(s["title"]),
                                         "  [headless]" if s.get("headless") else "")
-    return SEP.join([r["host"], r["path"], s["id"], display])
+    return SEP.join([r["host"], to_field(r["path"]), to_field(s["id"]), display])
 
 
 def prompt_line(r, s, text, now):
     where = "%s:%s" % (_one_line(r["host"]), _shown_name(r))
     text = _one_line(text)
     display = "%5s  %-28s │ %s" % (human_age(now - s["last_ts"]), where[:28], text)
-    return SEP.join([r["host"], r["path"], s["id"], text, display])
+    return SEP.join([r["host"], to_field(r["path"]), to_field(s["id"]), text, display])
 
 
 def file_line(f):
-    return SEP.join([f["path"], "%s %s  (%dK)" % ("⚑" if f["suspicious"] else " ", _one_line(f["path"]),
+    return SEP.join([to_field(f["path"]), "%s %s  (%dK)" % ("⚑" if f["suspicious"] else " ", _one_line(f["path"]),
                                                    f["size"] // 1024)])
 
 
@@ -483,9 +525,13 @@ def preview_text(r, now, live=None):
     if r.get("uncollected"):
         pass                     # nothing collected: git / directory facts would mislead
     elif g:
-        out.append("git: %s  ±%d ↑%d  untracked %d%s  last commit %s ago" % (
+        out.append("git: %s  ±%d ↑%d  untracked %d%s  %s" % (
             _one_line(g["branch"]), g["dirty"], g["ahead"], g["untracked"],
-            "  (no upstream)" if g["no_upstream"] else "", human_age(now - g["last_commit_ts"])))
+            "  (no upstream)" if g["no_upstream"] else "",
+            "no commits yet" if not g["last_commit_ts"]
+            else "last commit %s ago" % human_age(now - g["last_commit_ts"])))
+    elif r["exists"] and git_failed(r):
+        out.append("git 读取失败: %s" % "; ".join(_one_line(e) for e in git_errors(r)))
     elif r["exists"]:
         out.append("not a git repo")
     else:
@@ -546,7 +592,7 @@ def pick_project(rows, now, notice=None, select=None, board=None):
     lines = project_lines(rows, now, board)
     extra = []
     if select:
-        want = SEP.join(select) + SEP
+        want = SEP.join([select[0], to_field(select[1])]) + SEP
         pos = next((i for i, ln in enumerate(lines, 1) if ln.startswith(want)), None)
         if pos:
             extra.append("--bind=load:pos(%d)" % pos)
@@ -560,7 +606,7 @@ def pick_project(rows, now, notice=None, select=None, board=None):
     if not sel:
         raise Cancelled()
     host, path, _ = sel[0].split(SEP, 2)
-    return key, host, path
+    return key, host, from_field(path)
 
 
 def _backlog_rows(rows):
@@ -576,13 +622,13 @@ def backlog_lines(rows):
     for r in shown:
         b = r["backlog"]
         name = _shown_name(r) + ("@" + _one_line(r["host"]) if multi else "")
-        lines.append(SEP.join([r["host"], r["path"], "", "── %s ☐%d · 已完成 %d（未显示）──" % (
+        lines.append(SEP.join([r["host"], to_field(r["path"]), "", "── %s ☐%d · 已完成 %d（未显示）──" % (
             name, b.get("open") or 0, b.get("done") or 0)]))
         if not b.get("items"):
-            lines.append(SEP.join([r["host"], r["path"], "", "  （无法解析，预览看全文）"]))
+            lines.append(SEP.join([r["host"], to_field(r["path"]), "", "  （无法解析，预览看全文）"]))
         for idx, it in enumerate(b["items"]):
             if not it.get("done"):
-                lines.append(SEP.join([r["host"], r["path"], str(idx), "  ☐ " + _one_line(it.get("title"))]))
+                lines.append(SEP.join([r["host"], to_field(r["path"]), str(idx), "  ☐ " + _one_line(it.get("title"))]))
     return lines
 
 
@@ -614,7 +660,7 @@ def pick_backlog(rows, now):
     if not sel:
         raise Cancelled()
     host, path, _ = sel[0].split(SEP, 2)
-    return host, path
+    return host, from_field(path)
 
 
 def pick_session(pairs, now):
@@ -625,7 +671,7 @@ def pick_session(pairs, now):
     if not sel:
         raise Cancelled()
     host, path, sid, _ = sel[0].split(SEP, 3)
-    return host, path, sid
+    return host, from_field(path), from_field(sid)
 
 
 def pick_prompt(items, now, query=""):
@@ -639,7 +685,7 @@ def pick_prompt(items, now, query=""):
     if not sel:
         raise Cancelled()
     host, path, sid, _ = sel[0].split(SEP, 3)
-    return host, path, sid
+    return host, from_field(path), from_field(sid)
 
 
 def pick_files(files, preview=None):
@@ -653,7 +699,7 @@ def pick_files(files, preview=None):
         # `load` fires once piped input is read; `start` can fire before items exist.
         args.append("--bind=load:" + "+".join(["toggle+down"] * k) + "+first")
     _, sel = run_fzf([file_line(f) for f in files], args)
-    return [line.split(SEP, 1)[0] for line in sel]
+    return [from_field(line.split(SEP, 1)[0]) for line in sel]
 
 
 def pick_line(lines, header, shown_fields=None):

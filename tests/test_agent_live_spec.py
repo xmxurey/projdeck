@@ -660,8 +660,9 @@ def test_transcript_deleted_after_listdir_is_silent(env):
 
     env.mp.setattr(os, "listdir", listdir)
     out = env.live([repo])
-    if not hit:
-        pytest.skip("implementation does not index via os.listdir; race not reproducible")
+    assert hit, ("the race was not reproduced: the transcript index no longer goes through "
+                 "os.listdir of the project directory, so this test cannot delete the file "
+                 "between listing and reading; update the hook to the new indexing call")
     ss = by_id(out)
     assert "gone" not in ss and "good" in ss
     assert not out.get("errors")

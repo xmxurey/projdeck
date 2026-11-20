@@ -1,6 +1,6 @@
 # projdeck（命令 `proj`）设计文档
 
-日期：2026-10-16　状态：待评审
+日期：2026-10-16　状态：~~待评审~~ 已实现 / 已被取代；与代码不一致处以 README 和代码为准
 
 ## 1. 背景与目标
 
@@ -49,13 +49,13 @@ collect.py（只读，只用标准库，输出 JSON）
 
 | 模块 | 职责 | 依赖 |
 |---|---|---|
-| `collect.py` | 单文件、可独立运行的采集脚本。它会被原样通过 stdin 发送到远端执行，所以**不能 import 包内的其他模块**。 | 标准库、git |
+| ~~`collect.py`~~ | 单文件、可独立运行的采集脚本。它会被原样通过 stdin 发送到远端执行，所以**不能 import 包内的其他模块**。 | 标准库、git |
 | `config.py` | 读取 `~/.config/proj/config.json`，提供默认值 | — |
 | `sync.py` | 并行在各主机运行 collect，带超时；写缓存；失败时保留旧缓存并标记 | collect.py、config |
 | `model.py` | 读缓存，合并成统一的项目和会话列表；计算分档 | — |
 | `ui.py` | 生成 fzf 行和预览文本，调用 fzf，处理快捷键 | fzf |
 | `opener.py` | 拼出"进入目录 / 恢复会话"的 shell 命令，再通过 osascript 在 iTerm2 中打开。非 Mac 环境直接在当前终端执行 | osascript |
-| `clean.py` | 列出候选文件；移入回收站；写 manifest；还原；清空 | git |
+| ~~`clean.py`~~ | 列出候选文件；移入回收站；写 manifest；还原；清空 | git |
 | `report.py` | 生成 Markdown 总览 | model |
 | `cli.py` | 子命令分发（argparse） | 以上全部 |
 
@@ -89,7 +89,7 @@ collect.py（只读，只用标准库，输出 JSON）
 {
   "schema": 1, "host": "s-host", "collected_at": 1760600000,
   "projects": [{
-    "path": "/home/ubuntu/quant", "exists": true,
+    "path": "/home/u/quant", "exists": true,
     "git": {"branch": "main", "last_commit_ts": 0, "dirty": 2, "untracked": 0,
             "ahead": 0, "no_upstream": false},
     "last_mtime": 0,
@@ -133,9 +133,9 @@ fzf 列表中每行显示：主机、分档图标、项目名、最后活动（�
 
 | 按键 | 动作 |
 |---|---|
-| Enter | 在 iTerm2 新标签页进入该项目目录。远端项目执行 `ssh -t <alias> 'cd <path> && exec $SHELL -l'` |
+| Enter | 在 iTerm2 新标签页进入该项目目录。远端项目执行 ~~`ssh -t <alias> 'cd <path> && exec $SHELL -l'`~~ |
 | Ctrl-R | 在新标签页恢复最近一次会话：`cd <path> && claude --resume <id>` |
-| Ctrl-S | 进入该项目的会话列表，选中后恢复 |
+| ~~Ctrl-S~~ | 进入该项目的会话列表，选中后恢复 |
 | Ctrl-X | 对该项目打开清理助手 |
 | Ctrl-U | 立即同步 |
 
@@ -152,11 +152,11 @@ fzf 列表中每行显示：主机、分档图标、项目名、最后活动（�
 
 ## 6. 清理助手
 
-1. 在目标主机上执行 `git clean -nd`，得到"未跟踪且未被忽略"的文件和目录。**被 `.gitignore` 忽略的文件永远不在候选范围内。**
+1. 在目标主机上执行 ~~`git clean -nd`~~，得到"未跟踪且未被忽略"的文件和目录。**被 `.gitignore` 忽略的文件永远不在候选范围内。**
 2. 在 fzf 中多选：匹配可疑规则的候选默认勾选，其余列出但不勾选。预览栏显示文件内容的前几行。
 3. 用户确认后，在目标主机上执行以下步骤：
    - 再次确认每个文件仍然未被跟踪，已被跟踪的跳过。
-   - 将文件移动到 `~/.proj-trash/<YYYYmmdd-HHMMSS>/<项目名>/<相对路径>`。
+   - 将文件移动到 ~~`~/.proj-trash/<YYYYmmdd-HHMMSS>/<项目名>/<相对路径>`~~。
    - 写入 `manifest.json`，内容包括原路径、新路径和时间。
 4. `restore` 按 manifest 把文件移回原处。如果原路径上已经有文件，跳过并报告。
 5. 只有 `purge` 会真正删除文件。
@@ -167,7 +167,7 @@ fzf 列表中每行显示：主机、分档图标、项目名、最后活动（�
 
 - 单个仓库采集出错时，错误写进该仓库的 `errors` 字段，不影响其他仓库。
 - 某台主机 SSH 失败或超时（默认 20 秒）时，保留旧缓存并标记 `stale_since`。界面上显示"⚠ 数据来自 Xh 前"。
-- 缓存的 `schema` 版本不匹配时，提示重新同步。
+- 缓存的 `schema` 版本不匹配时，~~提示重新同步~~。
 - 清理操作在移动前重新检查文件状态；任何一步失败都不影响已经写入 manifest 的部分。
 - 不在 Mac 上，或找不到 iTerm2 时，打开器退回为在当前终端执行命令。
 
@@ -184,7 +184,7 @@ fzf 列表中每行显示：主机、分档图标、项目名、最后活动（�
 - 分档边界。
 - 可疑规则：包括 `tests/` 下的例外。
 - clean → restore 往返后文件与原来完全一致；purge 只删除过期的批次。
-- 远端路径：`ssh localhost` 冒烟测试（环境可用时运行）。
+- 远端路径：~~`ssh localhost` 冒烟测试~~（环境可用时运行）。
 - opener：只测试命令拼接，包括引号和空格转义。真实打开 iTerm2 标签页由用户在 Mac 上手动验证。
 
 ## 9. 不在 v1 范围内

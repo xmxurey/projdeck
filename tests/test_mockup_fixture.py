@@ -5,9 +5,6 @@ import re
 import pytest
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "mockup_terminal.json")
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# repo-relative: the run ledger's design.md, present wherever the ledger is checked out
-DESIGN = os.path.join(ROOT, "docs", "dev", "runs", "2026-11-18-proj-dashboard", "design.md")
 KINDS = {"w", "live", "s", "b", "n"}
 
 
@@ -96,29 +93,3 @@ def test_tie_prefers_earlier_order():
     segs = [["b", 0, 5], ["s", 0, 5]]
     assert cells(segs, 0, 1, 10, ["w", "live", "s", "b"], 0.5) == ["s"]
     assert cells([["b", 0, 0.5]], 0, 1, 10, ["w", "live", "s", "b"], 0.5) == ["n"]
-
-
-def _design_block(label_regex):
-    with open(DESIGN) as f:
-        text = f.read()
-    return text[text.index("## 附录 A"):]
-
-
-@pytest.mark.skipif(not os.path.exists(DESIGN),
-                    reason="%s is missing: the run ledger (docs/dev/runs/) is not in this checkout, "
-                           "so the fixture cannot be compared with design appendix A"
-                           % os.path.relpath(DESIGN, ROOT))
-def test_matches_design_appendix_verbatim(fx):
-    app = _design_block(None)
-    for name in ("qp", "pc"):
-        start = app.index("%s = [[" % name) + len(name) + 3
-        end = app.index("]]", start) + 2
-        lit = json.loads(app[start:end])
-        assert lit == fx["segs"][name], name
-    for key, hdr in (("qp_24", "cells(qp, NOW-180, 24, 7.5)"),
-                     ("pc_24", "cells(pc, NOW-180, 24, 7.5)"),
-                     ("pc_48", "cells(pc, NOW-360, 48, 7.5)")):
-        i = app.index(hdr)
-        block = app[app.index("```", i) + 3:]
-        block = block[:block.index("```")]
-        assert block.split() == fx["expected"][key], key

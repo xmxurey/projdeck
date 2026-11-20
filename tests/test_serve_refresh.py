@@ -264,8 +264,10 @@ def test_snapshot_readers_never_see_a_partial_board(cache):
         try:
             while not stop.is_set():
                 b = r.snapshot()
-                assert set(b) == keys
-                assert b["summary"]["waiting"] == len(b["waiting"])
+                for _ in range(2):  # now, and again after holding the reference a while
+                    assert set(b) == keys
+                    assert b["summary"]["waiting"] == len(b["waiting"])
+                    time.sleep(0.001)
                 reads[0] += 1
         except Exception as e:  # noqa: BLE001 - surfaced below
             errors.append(e)
@@ -326,11 +328,11 @@ def test_run_loop_refreshes_and_stops_on_event(cache):
 
 # ---- the real push over (fake) ssh
 
-def test_push_statusline_writes_remote_file_over_ssh(fake_ssh, capsys):
+def test_pusher_writes_remote_file_over_ssh(fake_ssh, capsys):
     cfg = make_cfg(hosts=(LOCAL, REMOTE, {"name": "gone", "ssh": "unreachable"}))
     doc = {"updated": T0, "waiting": [{"host": "s-host", "project": "alpha", "name": "n",
                                        "session_id": "a", "since": T0 - 5}]}
-    threads = serve.push_statusline(cfg, doc)
+    threads = serve.StatuslinePusher(cfg).push(doc)
     assert len(threads) == 2  # the local host is never pushed to
     for t in threads:
         t.join(10)
@@ -347,7 +349,8 @@ def test_push_statusline_writes_remote_file_over_ssh(fake_ssh, capsys):
 def test_serve_runs_the_refresher_and_stops_it(tmp_path, monkeypatch):
     from projdeck import cli
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"hosts": [{"name": "s-host", "local": True, "roots": []}]}))
+    (tmp_path / "empty-root").mkdir()
+    cfg_path.write_text(json.dumps({"hosts": [{"name": "s-host", "local": True, "roots": [str(tmp_path / "empty-root")]}]}))
     monkeypatch.setenv("PROJ_CONFIG", str(cfg_path))
     monkeypatch.setenv("PROJ_CACHE", str(tmp_path / "cache"))
     monkeypatch.setattr(serve, "tailscale_self", lambda: None)
@@ -455,7 +458,8 @@ def test_sigterm_takes_the_normal_exit_path(tmp_path, monkeypatch):
     wait for running syncs, then restore the previous handler."""
     from projdeck import cli
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"hosts": [{"name": "s-host", "local": True, "roots": []}]}))
+    (tmp_path / "empty-root").mkdir()
+    cfg_path.write_text(json.dumps({"hosts": [{"name": "s-host", "local": True, "roots": [str(tmp_path / "empty-root")]}]}))
     monkeypatch.setenv("PROJ_CONFIG", str(cfg_path))
     monkeypatch.setenv("PROJ_CACHE", str(tmp_path / "cache"))
     monkeypatch.setattr(serve, "tailscale_self", lambda: None)
@@ -503,7 +507,8 @@ def _sigterm_serve(tmp_path, monkeypatch, wrap_make_server=None, server_cls=None
     running after the signal. Returns (rc, guard_calls, watchdog_fired)."""
     from projdeck import cli
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"hosts": [{"name": "s-host", "local": True, "roots": []}]}))
+    (tmp_path / "empty-root").mkdir()
+    cfg_path.write_text(json.dumps({"hosts": [{"name": "s-host", "local": True, "roots": [str(tmp_path / "empty-root")]}]}))
     monkeypatch.setenv("PROJ_CONFIG", str(cfg_path))
     monkeypatch.setenv("PROJ_CACHE", str(tmp_path / "cache"))
     monkeypatch.setattr(serve, "tailscale_self", lambda: None)

@@ -45,9 +45,9 @@ def test_header_counters_and_idle_counted_apart():
 
 
 def test_header_host_freshness():
-    hosts = [{"name": "s-host", "live_at": NOW - 2, "collect_at": NOW - 60, "stale_since": None, "error": None},
-             {"name": "em-host", "live_at": NOW - 120, "collect_at": None, "stale_since": None, "error": None},
-             {"name": "mac", "live_at": NOW - 900, "collect_at": None, "stale_since": NOW - 800,
+    hosts = [{"name": "s-host", "live_at": NOW - 2, "live_synced_at": NOW - 2, "collect_at": NOW - 60, "stale_since": None, "error": None},
+             {"name": "em-host", "live_at": NOW - 120, "live_synced_at": NOW - 120, "collect_at": None, "stale_since": None, "error": None},
+             {"name": "mac", "live_at": NOW - 900, "live_synced_at": NOW - 900, "collect_at": None, "stale_since": NOW - 800,
               "error": EVIL}]
     html = web.render(board(hosts=hosts), "home")
     assert "s-host 实时" in html and "em-host 2m 前采集" in html

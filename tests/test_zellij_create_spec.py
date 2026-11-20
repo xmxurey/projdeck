@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from projdeck import cli, config, opener, sync, ui
+from projdeck import agent, cli, config, opener, sync, ui
 
 NOW = int(time.time())
 SEP = "\x1f"
@@ -64,7 +64,9 @@ class Env:
         monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
         monkeypatch.delenv("ZFAIL_DELETE", raising=False)
         monkeypatch.delenv("ZFAIL_SESSION", raising=False)
-        monkeypatch.setenv("PATH", "%s:/usr/bin:/bin" % self.bin)
+        # our stand-ins first, then conftest's stand-ins (tmux, ssh, ...), then the system
+        monkeypatch.setenv("PATH", os.pathsep.join(
+            [str(self.bin), os.environ["PROJ_STUB_DIRS"], "/usr/bin", "/bin"]))
         monkeypatch.setenv("SHELL", str(self.bin / "fakeshell"))
         monkeypatch.setenv("ZLOG", str(self.zlog))
         monkeypatch.setenv("CLOG", str(self.clog))
@@ -151,52 +153,60 @@ def kdl_strings(text):
     return out
 
 
+HOME = "/home/u"
+
+
+def sname(given):
+    """Session name of the project called `given` (relative to HOME) under HOME."""
+    return opener.proj_session_name(given, HOME + "/" + given, HOME)
+
+
 # ------------------------------------------------------------------ AC1: naming
 @pytest.mark.parametrize("given,expected", [
     ("quant", "proj-quant"),
-    ("dev/process-core", "proj-dev-process-core"),
+    ("dev-process-core", "proj-dev-process-core"),
 ])
 def test_name_examples(given, expected):
-    assert opener.proj_session_name(given) == expected
+    assert sname(given) == expected
 
 
 @pytest.mark.parametrize("given", ["中文", "...", "---", "./-"])
 def test_empty_after_normalising_gets_project_plus_4_hex(given):
-    n = opener.proj_session_name(given)
+    n = sname(given)
     assert re.fullmatch(r"proj-project-[0-9a-f]{4}", n), n
-    assert n == opener.proj_session_name(given)
+    assert n == sname(given)
 
 
 def test_literally_empty_input_still_gives_a_valid_stable_name():
-    n = opener.proj_session_name("")
+    n = sname("")
     assert re.fullmatch(r"proj-project(-[0-9a-f]{4})?", n), n
-    assert n == opener.proj_session_name("")
+    assert n == sname("")
 
 
 def test_lossless_names_get_no_suffix():
-    assert opener.proj_session_name("quant") == "proj-quant"
-    assert opener.proj_session_name("dev/process-core") == "proj-dev-process-core"
-    assert opener.proj_session_name("a.b_c-d") == "proj-a.b_c-d"
+    assert sname("quant") == "proj-quant"
+    assert sname("dev-process-core") == "proj-dev-process-core"
+    assert sname("a.b_c-d") == "proj-a.b_c-d"
 
 
 def test_colliding_lossy_inputs_get_different_names():
-    a, b = opener.proj_session_name("dev/a b"), opener.proj_session_name("dev/a-b")
+    a, b = sname("dev/a b"), sname("dev/a-b")
     assert a != b
-    assert b == "proj-dev-a-b"
+    assert re.fullmatch(r"proj-dev-a-b-[0-9a-f]{4}", b), b
     assert re.fullmatch(r"proj-dev-a-b-[0-9a-f]{4}", a), a
-    c, d = opener.proj_session_name("dev/中文"), opener.proj_session_name("dev/日本")
+    c, d = sname("dev/中文"), sname("dev/日本")
     assert c != d
 
 
 def test_same_input_same_name_many_times():
     for given in ("dev/a b", "中文", "x" * 80, "quant"):
-        assert len({opener.proj_session_name(given) for _ in range(5)}) == 1
+        assert len({sname(given) for _ in range(5)}) == 1
 
 
 @pytest.mark.parametrize("given", [".a b/中文", "a b", "x/y/z", "--lead", "..hidden", "é", 'q"uote', "a\\b",
                                    "a" * 100, "x\ny", "\x1b[31mred", "..." + "b" * 50])
 def test_name_charset_leading_and_length(given):
-    n = opener.proj_session_name(given)
+    n = sname(given)
     assert n.startswith("proj-")
     rest = n[len("proj-"):]
     assert rest and re.fullmatch(r"[A-Za-z0-9._-]+", rest), n
@@ -206,17 +216,17 @@ def test_name_charset_leading_and_length(given):
 
 def test_truncated_name_gets_a_suffix_and_stays_within_32():
     for given in ("a" * 40, "---" + "b" * 40):
-        n = opener.proj_session_name(given)
+        n = sname(given)
         rest = n[len("proj-"):]
         assert len(rest) <= 32, n
         assert re.fullmatch(r"[ab]+-[0-9a-f]{4}", rest), n
-    assert opener.proj_session_name("a" * 40) != opener.proj_session_name("a" * 41)
+    assert sname("a" * 40) != sname("a" * 41)
 
 
 def test_name_is_deterministic_and_distinguishes_nested_projects():
     for given in ("dev/process-core", ".a b/中文", "quant"):
-        assert opener.proj_session_name(given) == opener.proj_session_name(given)
-    assert opener.proj_session_name("a/b") != opener.proj_session_name("b")
+        assert sname(given) == sname(given)
+    assert sname("a/b") != sname("b")
 
 
 # ------------------------------------------------------------------ AC2: create / replace
@@ -334,9 +344,10 @@ def test_layout_failing_midway_falls_back_and_leaves_no_final_file(env, monkeypa
     assert out[0] == "inline"
     assert env.launched == [r["path"]] and env.opened == []
     assert not any(f.endswith("proj-quant.kdl") for f in env.kdl_files())
-    err = capsys.readouterr().err
-    assert len([l for l in err.splitlines() if l.strip()]) >= 1
-    assert env.logged == [] or "created" not in env.logged[0][1]
+    err_lines = [l for l in capsys.readouterr().err.splitlines() if l.strip()]
+    assert len(err_lines) == 1, err_lines
+    assert "No space left on device" in err_lines[0]
+    assert not any("created" in k for _a, k in env.logged)
 
 
 # ------------------------------------------------------------------ AC3: never touch the user's sessions
@@ -421,7 +432,13 @@ def test_live_proj_session_not_owned_goes_through_zellij_attach_only(env):
     out = env.open(r)
     assert out[0] == "inline"
     cmd, kwargs, _a = command_of(env)
-    assert cmd == opener.zellij_attach("proj-quant", r["path"]) or "attach proj-quant" in cmd
+    # the exact text, written out here rather than computed by the function under test
+    assert cmd == (
+        "if zellij list-sessions -n 2>/dev/null | "
+        "awk -v n=proj-quant '$1 == n {r = substr($0, length($1) + 1); "
+        "if (r !~ /\\(EXITED([^A-Za-z0-9_()][^()]*)?\\)[ \t\\r\\f\\v]*$/) f = 1} END {exit !f}'; "
+        "then exec zellij attach proj-quant; "
+        "else cd %s && \"$SHELL\" -lic 'claude --resume'; exec \"$SHELL\" -l; fi" % shlex.quote(r["path"]))
     assert "delete-session" not in cmd and "--new-session-with-layout" not in cmd
     res = env.run_command(cmd)
     calls = [c for c in env.zcalls() if c[0] != "list-sessions"]
@@ -475,11 +492,14 @@ def test_zellij_missing_from_path_runs_claude_inline_and_writes_no_layout(env, m
 
 
 def test_zellij_timeout_runs_claude_inline(env, monkeypatch):
+    # the timeout is a default argument of agent.zellij_session_list (run, timeout)
+    run_default, _timeout = agent.zellij_session_list.__defaults__
+    monkeypatch.setattr(agent.zellij_session_list, "__defaults__", (run_default, 0.3))
     (env.bin / "zellij").write_text('#!/bin/sh\nexec sleep 30\n')
     r = env.project()
     t0 = time.time()
     out = env.open(r)
-    assert time.time() - t0 < 25
+    assert time.time() - t0 < 3
     assert out[0] == "inline"
     assert env.launched == [r["path"]] and env.opened == []
     assert env.kdl_files() == []
@@ -503,7 +523,7 @@ def test_unwritable_layout_dir_falls_back_with_one_stderr_line(env, capsys):
     assert env.launched == [r["path"]] and env.opened == []
     assert env.kdl_files() == []
     err = capsys.readouterr().err
-    assert len([l for l in err.splitlines() if l.strip()]) >= 1
+    assert len([l for l in err.splitlines() if l.strip()]) == 1
     assert not any(k.get("created") for _a, k in env.logged)
     assert not any(c[0] == "delete-session" for c in env.zcalls())
 

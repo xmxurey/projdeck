@@ -8,8 +8,8 @@ def tx(events, asks=(), **state):
     return {"state": state, "events": list(events), "asks": list(asks)}
 
 
-def seg(t, live=False, status="idle", subs=0, now=NOW, since=SINCE):
-    return agent.segments(t, now, since, live, status, subs)
+def seg(t, live=False, status="idle", subs=0, now=NOW, since=SINCE, spans=()):
+    return agent.segments(t, now, since, live, status, subs, spans)
 
 
 def test_gap_before_human_over_threshold_is_wait():
@@ -24,9 +24,9 @@ def test_short_gap_before_human_not_recorded():
     assert "wait" not in kinds
 
 
-def test_gap_before_peer_is_sub():
+def test_gap_before_peer_is_sub_when_a_span_covers_it():
     t = tx([(SINCE + 100, "H"), (SINCE + 200, "C"), (SINCE + 5000, "P"), (SINCE + 5100, "C")])
-    assert ["sub", SINCE + 200, SINCE + 5000] in seg(t)
+    assert ["sub", SINCE + 200, SINCE + 5000] in seg(t, spans=[[SINCE + 150, SINCE + 5100]])
 
 
 def test_gap_before_meta_not_recorded_later_turn_busy():

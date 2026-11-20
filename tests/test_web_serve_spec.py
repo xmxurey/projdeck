@@ -38,7 +38,7 @@ class Srv:
             return board()
         self.server = serve.make_server(config.load_config(), "127.0.0.1", 0, snapshot_fn or snap)
         self.port = self.server.server_address[1]
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, args=(0.02,), daemon=True)
         self.thread.start()
 
     def req(self, method, path, host="default", raw_host=False):
@@ -148,11 +148,24 @@ def test_route_content_type_and_headers(srv, path, ctype):
     assert "unsafe-inline" not in hdr(h, "Content-Security-Policy")
 
 
-def test_state_json_parses_and_has_no_prompts(srv):
-    st, h, body = srv.req("GET", "/api/state.json")
+def test_state_json_parses_and_has_no_prompts(monkeypatch):
+    monkeypatch.setattr(serve, "tailscale_self", lambda: dict(TS))
+    b = board()
+    b["summary"] = {"waiting": 2, "busy": 1, "sub": 0, "idle": 3, "unknown": 0,
+                    "open_todos": 4, "todo_projects": 2}
+    b["waiting"] = [{"id": "w1"}, {"id": "w2"}]
+    b["busy"] = [{"id": "b1"}]
+    b["idle"] = [{"id": "i1"}, {"id": "i2"}, {"id": "i3"}]
+    s = Srv(lambda: b)
+    try:
+        st, h, body = s.req("GET", "/api/state.json")
+    finally:
+        s.close()
+    assert st == 200
     d = json.loads(body.decode("utf-8"))
-    assert isinstance(d, dict)
     assert "prompts" not in body.decode("utf-8")
+    assert d["summary"] == b["summary"]
+    assert [len(d[k]) for k in ("waiting", "busy", "idle")] == [2, 1, 3]
     for k in ("hosts", "summary", "waiting", "busy", "idle"):
         assert k in d
 
@@ -179,7 +192,14 @@ def test_unknown_and_traversal_paths_404_with_headers(srv, path):
 
 
 def test_query_string_does_not_change_routing(srv):
-    assert srv.req("GET", "/api/state.json?x=1")[0] in (200, 404)
+    plain = srv.req("GET", "/api/state.json")
+    assert plain[0] == 200
+    with_query = srv.req("GET", "/api/state.json?x=1")
+    assert with_query[0] == 200
+    assert with_query[2] == plain[2]
+    css = srv.req("GET", "/static/base.css")[2]
+    assert srv.req("GET", "/static/base.css?v=2")[0] == 200
+    assert srv.req("GET", "/static/base.css?v=2")[2] == css
     assert srv.req("GET", "/x?a=/")[0] == 404
 
 

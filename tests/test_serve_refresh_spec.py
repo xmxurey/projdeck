@@ -1,4 +1,4 @@
-"""Spec-derived tests for serve.Refresher and push_statusline (T24)."""
+"""Spec-derived tests for serve.Refresher and StatuslinePusher (T24)."""
 import copy
 import json
 import os
@@ -575,10 +575,12 @@ def test_snapshot_always_complete_while_refreshing(cache_dir, fk):
         while not stop.is_set():
             try:
                 b = r.snapshot()
-                for k in BOARD_KEYS:
-                    assert k in b, k
-                assert b["summary"]["waiting"] == len(b["waiting"])
-                assert b["summary"]["idle"] == len(b["idle"])
+                for _ in range(2):  # now, and again after holding the reference a while
+                    for k in BOARD_KEYS:
+                        assert k in b, k
+                    assert b["summary"]["waiting"] == len(b["waiting"])
+                    assert b["summary"]["idle"] == len(b["idle"])
+                    time.sleep(0.001)
                 reads[0] += 1
             except BaseException as e:   # noqa
                 errors.append(repr(e))
@@ -649,7 +651,7 @@ def test_run_loop_ticks_and_stops(cache_dir, fk):
     assert not t.is_alive()
 
 
-# ---------- real push_statusline through a fake ssh ----------
+# ---------- real StatuslinePusher through a fake ssh ----------
 
 @pytest.fixture
 def ssh_log(tmp_path, monkeypatch):
@@ -681,28 +683,23 @@ def ssh_calls(log):
     return out
 
 
-def wait_calls(log, n):
-    """push_statusline fans out to threads: poll (bounded) until n complete calls are logged."""
-    end = time.time() + 15
-    calls = ssh_calls(log)
-    while len(calls) < n and time.time() < end:
-        time.sleep(0.05)
-        calls = ssh_calls(log)
-    time.sleep(0.2)
-    return ssh_calls(log)
+def join_all(threads):
+    """Join the threads push() returned: once they are done every ssh it started has ended."""
+    for t in threads:
+        t.join(15)
+        assert not t.is_alive()
 
 
-def test_push_statusline_sends_doc_to_each_ssh_host_not_local(ssh_log):
+def test_pusher_sends_doc_to_each_ssh_host_not_local(ssh_log):
     cfg = make_cfg()
     cfg["hosts"] = [{"name": "loc", "local": True}, {"name": "s-host", "ssh": "s-host"},
                     {"name": "em-host", "ssh": "em-host"}]
     doc = {"updated": T0, "waiting": [{"host": "x", "project": "p", "name": "n",
                                        "session_id": "s1", "since": 5}]}
-    try:
-        serve.push_statusline(cfg, doc)
-    except Exception:
-        pass
-    calls = wait_calls(ssh_log, 2)
+    threads = serve.StatuslinePusher(cfg).push(doc)
+    assert len(threads) == 2                          # one push thread per ssh host
+    join_all(threads)
+    calls = ssh_calls(ssh_log)
     assert len(calls) == 2
     aliases = set()
     for args, stdin in calls:
@@ -715,11 +712,15 @@ def test_push_statusline_sends_doc_to_each_ssh_host_not_local(ssh_log):
     assert aliases == {"s-host", "em-host"}
 
 
-def test_push_statusline_with_no_remote_hosts_does_nothing(ssh_log):
+def test_pusher_with_no_remote_hosts_does_nothing(ssh_log):
     cfg = make_cfg()
     cfg["hosts"] = [{"name": "loc", "local": True}]
-    serve.push_statusline(cfg, {"updated": T0, "waiting": []})
-    time.sleep(0.3)
+    def push_thread_names():
+        return [t.name for t in threading.enumerate() if t.name.startswith("proj-push-")]
+    before = push_thread_names()
+    threads = serve.StatuslinePusher(cfg).push({"updated": T0, "waiting": []})
+    assert threads == []                              # no thread, not even a delayed one
+    assert set(push_thread_names()) <= set(before)    # and none that push() did not report
     assert ssh_calls(ssh_log) == []
 
 
@@ -786,6 +787,16 @@ def push_returns(pusher, doc):
     return not t.is_alive()
 
 
+def push_threads(pusher, doc):
+    """push() must return at once, even while ssh blocks; gives the threads it started."""
+    box = []
+    t = threading.Thread(target=lambda: box.append(pusher.push(doc)))
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "push() blocked"
+    return box[0]
+
+
 def one_host_cfg(*aliases):
     cfg = make_cfg()
     cfg["hosts"] = [{"name": "loc", "local": True}] + [{"name": a, "ssh": a} for a in aliases]
@@ -795,33 +806,46 @@ def one_host_cfg(*aliases):
 def test_three_docs_during_inflight_push_collapse_to_first_and_last(slow_ssh):
     (slow_ssh / "block.s-host").write_text("")
     pusher = serve.StatuslinePusher(one_host_cfg("s-host"))
-    assert push_returns(pusher, pdoc("d1"))
+    first = push_threads(pusher, pdoc("d1"))
+    assert len(first) == 1
     assert wait_for(lambda: len(starts(slow_ssh, "s-host")) == 1)
-    assert push_returns(pusher, pdoc("d2"))
-    assert push_returns(pusher, pdoc("d3"))
+    assert push_threads(pusher, pdoc("d2")) == []     # the lane is busy: no second ssh
+    assert push_threads(pusher, pdoc("d3")) == []
     time.sleep(0.3)
     assert len(starts(slow_ssh, "s-host")) == 1       # nothing overlaps the in-flight push
     os.remove(str(slow_ssh / "block.s-host"))
-    assert wait_for(lambda: final(slow_ssh, "s-host") == pdoc("d3"))
-    time.sleep(0.5)
+    join_all(first)                                   # the lane drained: d1, then only d3
     assert len(starts(slow_ssh, "s-host")) == 2       # first and last only
     assert final(slow_ssh, "s-host") == pdoc("d3")
 
 
-def test_single_doc_is_pushed_once(slow_ssh):
+def test_single_doc_is_pushed_once(slow_ssh, monkeypatch):
+    real_sleep = time.sleep
+    pushing_sleeps = []
+
+    def spy(seconds):
+        caller = sys._getframe(1).f_globals.get("__name__")
+        # subprocess polls with time.sleep while it waits for ssh: that is not a delay
+        if threading.current_thread().name.startswith("proj-push-") and caller != "subprocess":
+            pushing_sleeps.append(seconds)
+        real_sleep(seconds)
+    monkeypatch.setattr(time, "sleep", spy)
     pusher = serve.StatuslinePusher(one_host_cfg("s-host"))
-    assert push_returns(pusher, pdoc("only"))
-    assert wait_for(lambda: final(slow_ssh, "s-host") == pdoc("only"))
-    time.sleep(0.4)
+    threads = push_threads(pusher, pdoc("only"))
+    assert len(threads) == 1
+    join_all(threads)
+    assert pushing_sleeps == []                       # sent at once, not after a delay
     assert len(starts(slow_ssh, "s-host")) == 1
+    assert final(slow_ssh, "s-host") == pdoc("only")
 
 
 def test_sequential_pushes_each_land(slow_ssh):
     pusher = serve.StatuslinePusher(one_host_cfg("s-host"))
     for sid in ("a", "b"):
-        assert push_returns(pusher, pdoc(sid))
-        assert wait_for(lambda: final(slow_ssh, "s-host") == pdoc(sid))
-    time.sleep(0.3)
+        threads = push_threads(pusher, pdoc(sid))
+        assert len(threads) == 1
+        join_all(threads)
+        assert final(slow_ssh, "s-host") == pdoc(sid)
     assert len(starts(slow_ssh, "s-host")) == 2
 
 
@@ -946,23 +970,37 @@ def sigterm_run(tmp_path, wait_for_response):
     cfg["hosts"] = [{"name": "loc", "local": True}]
     port = free_port()
     env = dict(os.environ, HOME=str(tmp_path / "h"), PROJ_CACHE=str(tmp_path / "pc"),
-               PYTHONPATH=root)
+               PYTHONPATH=root, PYTHONUNBUFFERED="1")
     os.makedirs(env["HOME"])
-    p = subprocess.Popen([sys.executable, "-c", CHILD, json.dumps(cfg), str(port)], cwd=root,
-                         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         universal_newlines=True)
-    try:
-        assert wait_for(lambda: listening(port) or p.poll() is not None, 30)
-        assert p.poll() is None, p.communicate()
-        if wait_for_response:
-            assert wait_for(lambda: answers(port), 30)
-        p.send_signal(signal.SIGTERM)
-        out, err = p.communicate(timeout=30)
-    finally:
-        if p.poll() is None:
-            p.kill()
-            p.communicate()
+    errfile = tmp_path / "serve.err"
+
+    def err_text():
+        with open(str(errfile)) as f:
+            return f.read()
+    with open(str(errfile), "w") as errf:
+        p = subprocess.Popen([sys.executable, "-c", CHILD, json.dumps(cfg), str(port)], cwd=root,
+                             env=env, stdout=subprocess.PIPE, stderr=errf,
+                             universal_newlines=True)
+        try:
+            # serve prints its address once the port is bound; reading that line leaves no
+            # probe connection of ours in flight when SIGTERM arrives
+            banner = "proj serve: http://127.0.0.1:%d/" % port
+            assert wait_for(lambda: banner in err_text() or p.poll() is not None, 30)
+            assert p.poll() is None, (p.communicate()[0], err_text())
+            if wait_for_response:
+                assert wait_for(lambda: answers(port), 30)
+            p.send_signal(signal.SIGTERM)
+            out, _ = p.communicate(timeout=30)
+        finally:
+            if p.poll() is None:
+                p.kill()
+                try:
+                    p.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    p.kill()                           # give up waiting
+    err = err_text()
     assert p.returncode == 0, (p.returncode, err[-500:])      # not killed by the signal
+    assert "Traceback" not in err, err[-500:]
     assert "RC 0" in out and "RESTORED True" in out
     assert not listening(port)                                 # shutdown ran, socket closed
 

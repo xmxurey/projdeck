@@ -26,31 +26,70 @@ def isolated_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
 
 
-@pytest.fixture(autouse=True)
-def no_real_claude(tmp_path_factory, monkeypatch):
-    """`claude agents --json` must never reach the real CLI, here or in child processes
-    (fake ssh): put a stub that prints [] first on PATH."""
-    d = tmp_path_factory.mktemp("fakeclaude")
-    stub = d / "claude"
-    stub.write_text("#!/bin/sh\necho '[]'\n")
-    stub.chmod(0o755)
-    monkeypatch.setenv("PATH", str(d) + os.pathsep + os.environ["PATH"])
+# Programs the tests must never reach for real: program name -> what its stand-in does.
+# ("print", text) prints text and exits 0; ("exit", code) just exits with code. Every stand-in
+# records its arguments, one call per line, in <dir>/calls (env PROJ_STUB_CALLS).
+REAL_PROGRAM_STUBS = {
+    "claude": ("print", "[]"),
+    "ssh": ("exit", 255),
+    "zellij": ("exit", 1),
+    "tmux": ("exit", 1),
+    "tailscale": ("exit", 1),
+    "systemctl": ("exit", 1),
+    "systemd-analyze": ("exit", 1),
+    "osascript": ("exit", 1),
+    "open": ("exit", 1),
+    "xdg-open": ("exit", 1),
+    "fzf": ("exit", 1),
+}
 
 
 @pytest.fixture(autouse=True)
-def no_real_zellij_or_ssh(tmp_path_factory, monkeypatch):
-    """Neither `zellij` nor `ssh` may reach the real program: stand-ins come first on PATH.
-    zellij answers every call with failure (= "not usable"); ssh fails with 255. Both record
-    their arguments, one call per line, in <dir>/calls (env PROJ_STUB_CALLS). Tests that need
-    a working one put their own stand-in in front."""
+def no_real_programs(tmp_path_factory, monkeypatch):
+    """None of REAL_PROGRAM_STUBS may reach the real program, here or in child processes:
+    stand-ins come first on PATH. Tests that need a working one put their own in front."""
     d = tmp_path_factory.mktemp("fakeremote")
+    cdir = tmp_path_factory.mktemp("fakeclaude")  # claude lives apart: tests inspect its dir name
     calls = d / "calls"
-    for prog, code in (("zellij", 1), ("ssh", 255)):
-        stub = d / prog
-        stub.write_text('#!/bin/sh\necho "%s $*" >> "%s"\nexit %d\n' % (prog, calls, code))
+    for prog, (kind, arg) in REAL_PROGRAM_STUBS.items():
+        body = "#!/bin/sh\necho \"%s $*\" >> \"%s\"\n" % (prog, calls)
+        body += "echo '%s'\n" % arg if kind == "print" else "exit %d\n" % arg
+        stub = (cdir if prog == "claude" else d) / prog
+        stub.write_text(body)
         stub.chmod(0o755)
-    monkeypatch.setenv("PATH", str(d) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PATH", os.pathsep.join([str(d), str(cdir), os.environ["PATH"]]))
     monkeypatch.setenv("PROJ_STUB_CALLS", str(calls))
+    monkeypatch.setenv("PROJ_STUB_DIRS", os.pathsep.join([str(d), str(cdir)]))
+
+
+@pytest.fixture
+def real_path():
+    """PATH without the stand-in directories; for the PROJ_LIVE_TESTS=1 tests only.
+    Returns the string; the caller decides where to use it."""
+    stubs = os.environ["PROJ_STUB_DIRS"].split(os.pathsep)
+    return os.pathsep.join(p for p in os.environ["PATH"].split(os.pathsep) if p not in stubs)
+
+
+@pytest.fixture
+def real_which(real_path):
+    """real_which(prog) -> path of the real program, or skip the test, naming what is missing."""
+    import shutil
+
+    def _which(prog):
+        found = shutil.which(prog, path=real_path)
+        if not found:
+            pytest.skip("PROJ_LIVE_TESTS=1 but no real %s on PATH" % prog)
+        return found
+    return _which
+
+
+@pytest.fixture(autouse=True)
+def isolated_proj_dirs(tmp_path_factory, monkeypatch):
+    """Cache and config never come from the outer shell: a tmp cache dir and a config path
+    that does not exist. Tests that need others set them again."""
+    d = tmp_path_factory.mktemp("projdirs")
+    monkeypatch.setenv("PROJ_CACHE", str(d / "cache"))
+    monkeypatch.setenv("PROJ_CONFIG", str(d / "no-config.json"))
 
 
 @pytest.fixture(autouse=True)
@@ -58,8 +97,10 @@ def clean_cli_notices():
     """cli collects refresh problems in a module-level list; no test may inherit another's."""
     from projdeck import cli
     del cli._notices[:]
+    cli._usage_warned = False
     yield
     del cli._notices[:]
+    cli._usage_warned = False
 
 
 @pytest.fixture(autouse=True)

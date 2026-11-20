@@ -47,6 +47,18 @@ def rows(caches, cfg, now):
     return out
 
 
+def git_errors(p):
+    """The collector errors that say git could not be read ("git:" prefix); the one place that
+    decides which errors those are."""
+    return [e for e in p.get("errors") or () if str(e).startswith("git:")]
+
+
+def git_failed(p):
+    """A project whose git could not be read: no git facts, and a git error was logged. Not the
+    same as "not a git repo" (no git, no error)."""
+    return not p.get("git") and bool(git_errors(p))
+
+
 def n_suspicious(r):
     """Total suspicious files; the list itself is capped by the agent."""
     return r.get("suspicious_count", len(r.get("suspicious") or []))

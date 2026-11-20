@@ -154,9 +154,10 @@ def test_cmd_sync_live_flag(fake_ssh, monkeypatch):
     monkeypatch.setattr(sync, "sync_all", lambda cfg, names=None, live_only=False: (
         got.append((names, live_only)) or [{"host": "h", "ok": True, "error": None}]))
     args = cli.parser().parse_args(["sync", "--live", "--quiet", "h"])
-    assert cli.cmd_sync({}, args) == 0
+    cfg = {"hosts": [{"name": "h", "local": True}]}
+    assert cli.cmd_sync(cfg, args) == 0
     assert got == [(["h"], True)]
-    cli.cmd_sync({}, cli.parser().parse_args(["sync", "--quiet"]))
+    cli.cmd_sync(cfg, cli.parser().parse_args(["sync", "--quiet"]))
     assert got[1] == (None, False)
 
 

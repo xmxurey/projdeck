@@ -284,7 +284,11 @@ def test_good_ledger_has_no_errors(tmp_path):
 def test_state_json_without_tasks_list_does_not_crash(tmp_path):
     make_ledger(tmp_path, [], state_text=json.dumps({"run_id": RUN_ID}))
     r = agent.find_tasks([str(tmp_path)], SINCE)
-    assert r is None or r["source"] != "run" or r["items"] == []
+    # an active run with no task list yet is itself worth showing (design 2.13 #3)
+    assert r is not None
+    assert r["source"] == "run"
+    assert r["items"] == []
+    assert r["label"] == "还没有计划"
 
 
 # ---------- 3. sdd ----------
@@ -360,8 +364,11 @@ def test_sdd_mtime_exactly_since_is_fresh(tmp_path):
 def test_sdd_stale_with_plan_not_a_source(tmp_path):
     sdd_with_plan(tmp_path, "Task 1: complete", mtime=SINCE - 5)
     r = agent.find_tasks([str(tmp_path)], SINCE)
-    # the plan file itself is fresh, so it may fall back to "plan", never "sdd"
-    assert r is None or r["source"] == "plan"
+    # the plan file itself is fresh, so it falls back to "plan", never "sdd"
+    assert r is not None
+    assert r["source"] == "plan"
+    assert [i["title"] for i in r["items"]] == ["Alpha", "Beta", "Gamma"]
+    assert all(i["status"] == "todo" for i in r["items"])
 
 
 def test_ledger_beats_sdd(tmp_path):
@@ -448,11 +455,10 @@ def test_nonexistent_checkout_returns_none(tmp_path):
     assert agent.find_tasks([str(tmp_path / "nope")], SINCE) is None
 
 
-def test_plan_without_task_headings_gives_no_source_or_empty(tmp_path):
+def test_plan_without_task_headings_gives_no_source(tmp_path):
     p = put(tmp_path / "docs" / "superpowers" / "plans" / "x.md", "# just prose\n")
     touch(p, NOW - 10)
-    r = agent.find_tasks([str(tmp_path)], SINCE)
-    assert r is None or r["items"] == []
+    assert agent.find_tasks([str(tmp_path)], SINCE) is None
 
 
 @pytest.mark.parametrize("setup", ["ledger", "sdd", "plan", "corrupt"])

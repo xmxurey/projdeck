@@ -6,6 +6,7 @@ to a file path), and sends the webkit security headers on every response. Reques
 only read the current snapshot through snapshot_fn; they never collect anything: a single
 Refresher thread does, and swaps in each new snapshot under a lock.
 """
+import errno
 import json
 import os
 import signal
@@ -16,11 +17,12 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from projdeck import board, config, sync, web
+from projdeck import board, config, sync, termtext, web
 from projdeck.vendor.webkit.webkit import SECURITY_HEADERS, check_bind, host_allowed
 
 TAILSCALE_TIMEOUT = 5
-REQUEST_TIMEOUT = 30  # seconds a client may take to send its request
+REQUEST_TIMEOUT = 30  # seconds a connection may take to send its request head (total)
+MAX_CONNECTIONS = 32  # connections handled at once; more are closed unanswered
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = {
@@ -60,7 +62,7 @@ REMOTE_EVERY = 120   # remote live, whether or not anyone is looking (D11)
 HEARTBEAT = 60       # re-push an unchanged statusline doc this often (D9)
 LOOP_MAX_WAIT = 1.0  # run() notices its stop event at least this often
 # the remote side mirrors sync.cache_dir()'s default; $$ keeps concurrent pushes apart
-PUSH_CMD = ("mkdir -p ~/.cache/proj/live && cat > ~/.cache/proj/live/statusline.state.$$.tmp"
+PUSH_CMD = ("umask 077; mkdir -p ~/.cache/proj/live && cat > ~/.cache/proj/live/statusline.state.$$.tmp"
             " && mv ~/.cache/proj/live/statusline.state.$$.tmp ~/.cache/proj/live/statusline.state")
 
 
@@ -71,7 +73,7 @@ def _collect_all(cfg):
 
 
 def _log(msg):
-    print("proj serve: %s" % msg, file=sys.stderr)
+    print("proj serve: %s" % termtext.one_line(msg), file=sys.stderr)
 
 
 def statusline_path():
@@ -144,12 +146,6 @@ class StatuslinePusher:
             with self._lock:
                 if lane["inflight"] is threading.current_thread():
                     lane["inflight"] = None
-
-
-def push_statusline(cfg, doc):
-    """One-off push of doc to every non-local host with an ssh alias (see StatuslinePusher;
-    Refresher keeps one pusher so pushes to a host stay in order)."""
-    return StatuslinePusher(cfg).push(doc)
 
 
 class Refresher:
@@ -376,9 +372,99 @@ def _read(path):
         return f.read()
 
 
+class _DeadlineReader:
+    """rfile for a request handler: reads straight from the socket, but the whole read
+    phase shares one deadline, so a client dribbling a byte at a time cannot hold the
+    connection. Past the deadline it raises socket.timeout, which the handler treats as
+    a dead connection. close() does not close the socket (the handler owns it)."""
+
+    def __init__(self, sock, deadline):
+        self._sock = sock
+        self._deadline = deadline
+        self._buf = b""
+
+    def _fill(self):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout("timed out")
+        self._sock.settimeout(min(remaining, REQUEST_TIMEOUT))
+        data = self._sock.recv(8192)
+        self._buf += data
+        return bool(data)
+
+    def readline(self, limit=-1):
+        while b"\n" not in self._buf and (limit < 0 or len(self._buf) < limit):
+            if not self._fill():
+                break
+        end = self._buf.find(b"\n") + 1 or len(self._buf)
+        if limit >= 0:
+            end = min(end, limit)
+        line, self._buf = self._buf[:end], self._buf[end:]
+        return line
+
+    def read(self, n=-1):
+        while (n < 0 or len(self._buf) < n) and self._fill():
+            pass
+        end = len(self._buf) if n < 0 else n
+        data, self._buf = self._buf[:end], self._buf[end:]
+        return data
+
+    def close(self):
+        pass
+
+
+class _Bounded:
+    """Mixin for a ThreadingHTTPServer that handles at most MAX_CONNECTIONS connections at once. A
+    connection over the limit is closed without a reply: writing one could block on a
+    slow reader, which is the very thing the limit guards against."""
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:  # the thread never started: nobody else will release
+            self._slots.release()
+            raise
+
+    def handle_error(self, request, client_address):
+        """SIGTERM (_Terminated) can unwind process_request just after a handler thread
+        started: socketserver then closes the request socket under that thread, which fails
+        with EBADF. Nothing else closes a connection early, so that one error is shutdown
+        noise, not a fault worth a traceback in the journal. Only once SIGTERM has fired: an
+        EBADF at any other time is a bug and keeps its traceback."""
+        exc = sys.exc_info()[1]
+        if _sigterm_received.is_set() and isinstance(exc, OSError) and exc.errno == errno.EBADF:
+            return
+        super().handle_error(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def _handler(snapshot_fn, static, names, port):
     class Handler(BaseHTTPRequestHandler):
-        timeout = REQUEST_TIMEOUT
+        def setup(self):
+            self.timeout = REQUEST_TIMEOUT
+            super().setup()
+            self.rfile.close()
+            self.rfile = _DeadlineReader(self.connection, time.monotonic() + REQUEST_TIMEOUT)
+
+        def parse_request(self):
+            try:
+                return super().parse_request()
+            finally:
+                # the head is read: rfile and wfile share the socket, and what is left of
+                # the read deadline must not become the timeout for writing the response
+                self.connection.settimeout(REQUEST_TIMEOUT)
 
         def version_string(self):
             return "proj"  # no Python version in the Server header
@@ -426,12 +512,14 @@ def _handler(snapshot_fn, static, names, port):
                 snap = snapshot_fn()
                 if path == STATE:
                     ctype = "application/json"
-                    body = json.dumps(_public(snap), ensure_ascii=False).encode("utf-8")
+                    body = termtext.no_surrogates(
+                        json.dumps(_public(snap), ensure_ascii=False)).encode("utf-8")
                 else:
                     ctype = "text/html"
                     page, fragment = PAGES[path]
                     # ages count from now: a snapshot that stopped refreshing reads as old
-                    body = web.render(snap, page, fragment, now=time.time()).encode("utf-8")
+                    body = termtext.no_surrogates(
+                        web.render(snap, page, fragment, now=time.time())).encode("utf-8")
             except Exception as e:  # a render bug must not kill the connection silently
                 print("proj serve: %s failed: %r" % (path, e), file=sys.stderr)
                 return self._text(500, "internal error")
@@ -464,10 +552,9 @@ def make_server(cfg, bind, port, snapshot_fn, ts_self=PROBE):
     if ts_self is PROBE:
         ts_self = tailscale_self()
     static = {p: (_read(f), ctype) for p, (f, ctype) in STATIC.items()}
-    cls = ThreadingHTTPServer
-    if ":" in bind:
-        cls = type("ThreadingHTTPServer6", (ThreadingHTTPServer,),
-                   {"address_family": socket.AF_INET6})
+    # composed here, not at import time, so the IPv6 variant gets the limit too
+    attrs = {"address_family": socket.AF_INET6} if ":" in bind else {}
+    cls = type("BoundedThreadingHTTPServer", (_Bounded, ThreadingHTTPServer), attrs)
     srv = cls((bind, port), BaseHTTPRequestHandler)
     srv.daemon_threads = True
     actual = srv.server_address[1]
@@ -475,6 +562,9 @@ def make_server(cfg, bind, port, snapshot_fn, ts_self=PROBE):
                                        allowed_hosts(bind, actual, ts_self), actual)
     _warn_partial_whitelist(bind, actual, ts_self)
     return srv
+
+
+_sigterm_received = threading.Event()  # set by the SIGTERM handler; serve() clears it on start
 
 
 class _Terminated(BaseException):
@@ -494,6 +584,7 @@ def _on_sigterm_exit():
     def raise_terminated(sig, frame):
         if not fired:
             fired.append(sig)
+            _sigterm_received.set()  # before the unwind closes sockets under handler threads
             raise _Terminated()
     previous = signal.signal(signal.SIGTERM, raise_terminated)
     return lambda: signal.signal(signal.SIGTERM,
@@ -510,6 +601,7 @@ def serve(cfg, cli_bind=None, cli_port=None):
     except ValueError as e:
         print("proj serve: %s" % e, file=sys.stderr)
         return 2
+    _sigterm_received.clear()  # no flag left over from an earlier serve() in this process
     refresher = Refresher(cfg)  # starts from the existing caches
 
     def snapshot_fn():

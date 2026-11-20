@@ -52,7 +52,7 @@ def git(path, *args):
         raise RuntimeError("cannot run git: %s" % e)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.decode("utf-8", "replace").strip() or "git failed")
-    return r.stdout.decode("utf-8", "replace")
+    return r.stdout.decode("utf-8", "surrogateescape")
 
 
 def is_repo(path):
@@ -712,6 +712,56 @@ def count_subagents(session_dir, now):
     return n
 
 
+def _sub_span(path):
+    """[first timestamp, mtime] of one subagent transcript, or None when unreadable,
+    timestamp-less or inverted."""
+    try:
+        end = os.stat(path).st_mtime
+        with open(path, "rb") as f:
+            head = f.read(64 * 1024)
+    except OSError:
+        return None
+    start = None
+    for raw in head.splitlines():
+        start = _ts_of(raw.decode("utf-8", "replace"))
+        if start is not None:
+            break
+    if start is None or start > end:
+        return None
+    return [start, int(end)]
+
+
+def subagent_spans(session_dir, memo=None, used=None):
+    """[[start, end], ...] of the subagent transcripts under <session_dir>/subagents:
+    first timestamp to last write. Results are kept in `memo` keyed by
+    ("sub", path, size, mtime_ns); keys looked at are added to `used` so the caller can
+    prune the rest."""
+    sub = os.path.join(session_dir, "subagents")
+    try:
+        names = sorted(n for n in os.listdir(sub) if n.endswith(".jsonl"))
+    except OSError:
+        return []
+    spans = []
+    for name in names:
+        path = os.path.join(sub, name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        key = ("sub", path, st.st_size, st.st_mtime_ns)
+        if memo is not None and key in memo:
+            span = memo[key]
+        else:
+            span = _sub_span(path)
+            if memo is not None:
+                memo[key] = span
+        if used is not None:
+            used.add(key)
+        if span:
+            spans.append(list(span))
+    return spans
+
+
 def _secs(v):
     """Epoch seconds from a seconds/milliseconds number or an ISO 8601 string, else None."""
     if isinstance(v, str):
@@ -784,8 +834,25 @@ def _turns(events):
     return turns
 
 
-def segments(tx, now, since, live, status, subagents_running):
-    """Timeline [[kind, start, end], ...] (integer seconds) clipped to [since, now]."""
+def _split_gap(start, end, spans):
+    """Parts of [start, end] covered by the union of spans -> ("sub", a, b); the uncovered
+    parts longer than GAP_WAIT -> ("wait", a, b)."""
+    out, pos = [], start
+    for a, b in sorted((max(a, start), min(b, end)) for a, b in spans):
+        if b <= a or b <= pos:
+            continue
+        if a > pos:
+            out.append(["wait", pos, a])
+        out.append(["sub", max(a, pos), b])
+        pos = b
+    if pos < end:
+        out.append(["wait", pos, end])
+    return [g for g in out if g[0] == "sub" or g[2] - g[1] > GAP_WAIT]
+
+
+def segments(tx, now, since, live, status, subagents_running, sub_spans=()):
+    """Timeline [[kind, start, end], ...] (integer seconds) clipped to [since, now].
+    A gap before a P turn is "sub" only where sub_spans (subagent write periods) cover it."""
     state = tx.get("state") or {}
     turns = _turns(tx.get("events") or [])
     waits = [(a, b) for a, b in (tx.get("asks") or []) if b - a > GAP_WAIT]
@@ -812,7 +879,7 @@ def segments(tx, now, since, live, status, subagents_running):
         if i + 1 < len(turns):
             ts, nkind = turns[i + 1][0], turns[i + 1][2]
             if nkind == "P":
-                segs.append(["sub", end, ts])
+                segs += _split_gap(end, ts, sub_spans)
             elif nkind == "H" and ts - end > GAP_WAIT:
                 segs.append(["wait", end, ts])
     if live:
@@ -1174,7 +1241,9 @@ def attach_map(proc="/proc"):
             _, _, cargv, _ = table[cur]
             if (len(cargv) >= 3 and os.path.basename(cargv[0]) == "zellij"
                     and cargv[1] == "--server"):
-                cmd = "zellij attach %s" % shlex.quote(os.path.basename(cargv[2].rstrip("/")))
+                sname = os.path.basename(cargv[2].rstrip("/"))
+                if not sname.startswith("-"):  # would be read as an option: no command
+                    cmd = "zellij attach %s" % shlex.quote(sname)
                 break
             if panes is None:
                 panes = _tmux_panes()
@@ -1701,7 +1770,10 @@ def act_purge(req):
 
 _NO_SESSIONS_RE = re.compile(r"\bno\b.*\bsessions?\b", re.I)
 _ZJ_NAME_RE = re.compile(r"^(.*?)\s+\[Created\b")
-_ZJ_EXITED_RE = re.compile(r"\(EXITED\b[^()]*\)\s*$")  # the trailing "(EXITED - attach to ...)"
+# The trailing "(EXITED - attach to ...)". ASCII only on purpose: opener.zellij_attach decides the
+# same thing in awk on the host, which has no Unicode word characters or spaces;
+# tests/test_exited_equivalence.py keeps the two in step.
+_ZJ_EXITED_RE = re.compile(r"\(EXITED(?![A-Za-z0-9_])[^()]*\)[ \t\r\f\v]*$")
 
 
 def zellij_session_list(run=subprocess.run, timeout=5):
@@ -1715,8 +1787,8 @@ def zellij_session_list(run=subprocess.run, timeout=5):
         return None
     out, err = r.stdout or "", r.stderr or ""
     sessions = []
-    for line in out.splitlines():
-        line = line.strip()
+    for line in out.split("\n"):  # not splitlines(): awk reads lines at "\n" only
+        line = line.strip(" \t\r\f\v")  # ASCII blanks only, like the awk in opener.zellij_attach
         if not line or _NO_SESSIONS_RE.search(line) and "[Created" not in line:
             continue
         m = _ZJ_NAME_RE.match(line)
@@ -1857,7 +1929,10 @@ def act_live(req, memo=None):
             evs = tx.get("events") or []
             started = _secs((ag or {}).get("startedAt")) or (min(e[0] for e in evs) if evs
                                                              else mtime)
-            segs = segments(tx, now, since, is_live, status, subs)
+            spans = []
+            if fp and any(e[1] == "P" for e in evs):
+                spans = subagent_spans(os.path.join(os.path.dirname(fp), sid), memo, used)
+            segs = segments(tx, now, since, is_live, status, subs, spans)
             last_human = tstate.get("last_human")
             s = {"id": sid, "project": project, "cwd": cwd, "latest_cwd": latest,
                  "kind": srec.get("kind") or "interactive", "live": is_live,

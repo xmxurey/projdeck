@@ -1,4 +1,6 @@
 """F3: the board says per host whether its live data was checked; unknown is never shown as fact."""
+import pytest
+
 from projdeck import board, ui, web
 
 NOW = 1_800_000_000
@@ -118,6 +120,15 @@ def test_tile_of_stale_remote_host_says_unknown():
     lv = live("em", [sess("w", "waiting")], at=NOW - 1000)
     b = board.build([cache("em", [project()])], [lv], CFG, NOW)
     assert b["stale_host_sessions"] and b["tiles"][0]["state"] == "unknown"
+
+
+@pytest.mark.parametrize("host,age", [("em", 400), ("s-host", 90)])
+def test_tile_of_aging_host_is_still_trusted(host, age):
+    """aging (past fresh, not yet stale) data can still say "no session runs"; only stale and
+    unknown data cannot."""
+    b = board.build([cache(host, [project()])], [live(host, [], at=NOW - age)], CFG, NOW)
+    assert board.host_freshness(hosts(b)[host], NOW)["level"] == "aging"
+    assert b["tiles"][0]["state"] == "none"
 
 
 def test_tile_of_fresh_host_without_sessions_says_none():

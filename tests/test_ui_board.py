@@ -27,7 +27,7 @@ def board(waiting=(), busy=(), idle=(), stale_host=(), hosts=None, **summary):
     s = {"waiting": len(waiting), "busy": len(busy), "idle": len(idle), "open_todos": 4,
          "today": {"busy": 2 * 3600 + 58 * 60, "sub": 3 * 3600 + 11 * 60, "wait": 7 * 3600 + 27 * 60}}
     s.update(summary)
-    return {"hosts": hosts or [{"name": "s-host", "live_at": NOW - 60}], "summary": s,
+    return {"hosts": hosts or [{"name": "s-host", "live_at": NOW - 60, "live_synced_at": NOW - 60}], "summary": s,
             "waiting": list(waiting), "busy": list(busy), "idle": list(idle),
             "stale_host_sessions": list(stale_host), "ended_today": [], "stale": []}
 
@@ -111,7 +111,7 @@ def test_busy_tail_task_bar_title_and_todos():
 
 def test_header_lines():
     b = board(waiting=[sess("w", "waiting")], idle=[sess("i", "idle")],
-              hosts=[{"name": "s-host", "live_at": NOW - 60}, {"name": "em", "live_at": NOW - 400}])
+              hosts=[{"name": "s-host", "live_at": NOW - 60, "live_synced_at": NOW - 60}, {"name": "em", "live_at": NOW - 400, "live_synced_at": NOW - 400}])
     l1, l2 = ui.header_lines(b, NOW)
     p1 = strip_ansi(l1)
     hhmm = time.strftime("%H:%M", time.localtime(NOW - 60))
@@ -164,7 +164,7 @@ def test_minimal_row_uses_session_time_and_keeps_host_group_together():
 
 
 def test_two_old_hosts_write_refresh_hint_once():
-    b = board(hosts=[{"name": "s-host", "live_at": NOW - 400}, {"name": "em", "live_at": NOW - 500}])
+    b = board(hosts=[{"name": "s-host", "live_at": NOW - 400, "live_synced_at": NOW - 400}, {"name": "em", "live_at": NOW - 500, "live_synced_at": NOW - 500}])
     assert strip_ansi(ui.header_lines(b, NOW)[0]).count("^U 刷新") == 1
 
 

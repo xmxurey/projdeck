@@ -70,12 +70,28 @@ def test_empty_input_has_all_top_level_keys():
         assert b[k] == []
 
 
-def test_lanes_todos_backlogs_tiles_are_lists():
-    c, l = two_hosts([sess("a", "waiting")], [])
+def test_lanes_todos_backlogs_tiles_carry_the_content_of_the_input():
+    items = [{"title": "write docs", "done": False, "section": None, "text": "write docs"},
+             {"title": "ship it", "done": True, "section": None, "text": "ship it"}]
+    proj = {"path": "/home/u/proj", "exists": True, "git": None, "last_mtime": NOW - 50,
+            "sessions": [], "flag": True,
+            "backlog": {"path": "docs/backlog.md", "mtime": NOW - 100, "items": items,
+                        "open": 1, "done": 1, "raw": None}}
+    c = [cache("loc", projects=[proj]), cache("s-host")]
+    l = [live("loc", [sess("a", "waiting", question="which db?")], NOW - 10),
+         live("s-host", [], NOW - 30)]
     b = board.build(c, l, CFG, NOW)
-    for k in ("top_todos", "backlogs", "tiles"):
-        assert isinstance(b[k], list)
-    assert isinstance(b["lanes"], dict)
+    assert [(t["host"], t["project"], t["title"], t["flag"]) for t in b["top_todos"]] == [
+        ("loc", "/home/u/proj", "write docs", True)]
+    assert [(x["host"], x["project"], x["open"], x["done"]) for x in b["backlogs"]] == [
+        ("loc", "/home/u/proj", 1, 1)]
+    assert [i["title"] for i in b["backlogs"][0]["items"]] == ["write docs", "ship it"]
+    assert [(t["host"], t["project"], t["state"], t["todo"]) for t in b["tiles"]] == [
+        ("loc", "/home/u/proj", "wait", 1)]
+    assert b["tiles"][0]["text"] == "which db?"
+    assert [(r["host"], r["session_id"], r["state"]) for r in b["lanes"]["rows"]] == [
+        ("loc", "a", "waiting")]
+    assert b["lanes"]["end"] == NOW
 
 
 # ---------- acceptance 1: grouping and order ----------

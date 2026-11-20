@@ -1,5 +1,7 @@
 # Enter 弹出会话选择器 + 连接活 zellij 会话 Implementation Plan
 
+> 状态：已实现 / 已被取代；与代码不一致处以 README 和代码为准。复选框不代表执行记录。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 按 Enter 时，项目已有活的 zellij 会话就连进去，没有就在项目目录运行 `claude --resume`；列表上能看到 zellij 会话。
@@ -14,7 +16,7 @@
 
 - `agent.py` 保持只用标准库、不 import projdeck（它会经 ssh 送到远端运行）。
 - 不升级 `SCHEMA`；`live_zellij` 是可选字段，缺失时当空列表。
-- 不新建 zellij 会话，不复活已退出的会话：调用 `zellij attach` 前必须确认会话仍然活着（`zellij list-sessions -n` 里那一行不带 `EXITED`）。
+- ~~不新建 zellij 会话~~，不复活已退出的会话：调用 `zellij attach` 前必须确认会话仍然活着（`zellij list-sessions -n` 里那一行不带 `EXITED`）。
 - zellij 只支持本机 Linux 主机；macOS 本机或远端主机配 `"mux": "zellij"` 时，记一条警告显示在列表顶部，并当作 `False`。
 - 界面文字沿用现有英文。
 - 现有测试全部保持通过；测试命令 `python3 -m pytest -q tests`。
@@ -636,7 +638,7 @@ def open_project(rows, r):
 On a local Linux host with `"mux": "zellij"`, Enter joins the zellij session that already
 works in the project (found by the working directories of its processes; session names
 can be anything). Without one, Enter runs `claude --resume` in a plain shell, or in a new
-tab when proj itself runs inside zellij. proj never creates or resurrects zellij sessions.
+tab when proj itself runs inside zellij. ~~proj never creates~~ or resurrects zellij sessions.
 Inside zellij it cannot switch you to another session, so it tells you the name instead
 (Ctrl-o w). `"mux"` is `"zellij"`, `"tmux"` (default) or `false`; the older `"tmux"` key
 still works.

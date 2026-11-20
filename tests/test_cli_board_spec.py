@@ -332,7 +332,7 @@ def test_real_launcher_starts_proj_sync_live_quiet_without_waiting(no_ssh, real_
 
 def test_fresh_lives_marker_within_5min_blocks_spawn(no_ssh, real_cli):
     write_live("s-host", live_doc("s-host", NOW - 180))
-    m = sync.live_marker_path()
+    m = sync.marker_path(sync.LIVE_MARKER)
     os.makedirs(os.path.dirname(m), exist_ok=True)
     open(m, "w").close()
     os.utime(m, (time.time() - 60, time.time() - 60))
@@ -342,7 +342,7 @@ def test_fresh_lives_marker_within_5min_blocks_spawn(no_ssh, real_cli):
 
 def test_fresh_lives_marker_older_than_5min_allows_spawn(no_ssh, real_cli):
     write_live("s-host", live_doc("s-host", NOW - 180))
-    m = sync.live_marker_path()
+    m = sync.marker_path(sync.LIVE_MARKER)
     os.makedirs(os.path.dirname(m), exist_ok=True)
     open(m, "w").close()
     os.utime(m, (time.time() - 400, time.time() - 400))
@@ -351,7 +351,7 @@ def test_fresh_lives_marker_older_than_5min_allows_spawn(no_ssh, real_cli):
 
 
 def test_marker_name_and_window_are_the_documented_ones():
-    assert os.path.basename(sync.live_marker_path()) == ".syncing-live"
+    assert os.path.basename(sync.marker_path(sync.LIVE_MARKER)) == ".syncing-live"
     assert sync.MARKER_SECONDS == 300
 
 
@@ -376,7 +376,8 @@ BACKLOG = {"path": "docs/backlog.md", "mtime": NOW - 50, "open": 2, "done": 0, "
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     cfgp = tmp_path / "config.json"
-    cfgp.write_text(json.dumps({"hosts": [{"name": "local", "local": True, "roots": []}]}))
+    (tmp_path / "empty-root").mkdir()
+    cfgp.write_text(json.dumps({"hosts": [{"name": "local", "local": True, "roots": [str(tmp_path / "empty-root")]}]}))
     monkeypatch.setenv("PROJ_CONFIG", str(cfgp))
     write_cache("local", [{"path": "/proj/a", "last_mtime": NOW - 100, "backlog": BACKLOG},
                           {"path": "/proj/raw", "last_mtime": NOW - 100,

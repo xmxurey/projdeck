@@ -6,7 +6,7 @@ import shlex
 import subprocess
 import sys
 
-from projdeck import sync
+from projdeck import fsutil, paths, termtext
 
 q = shlex.quote
 LOGIN_SHELL = 'exec "$SHELL" -l'
@@ -20,7 +20,7 @@ def resume_inner(session_id):
 def tmux_name(path, session_id=None):
     """Stable tmux session name: project name + short path hash (+ Claude session)."""
     base = re.sub(r"[^A-Za-z0-9_-]", "_", os.path.basename(path.rstrip("/")) or "root")[:24]
-    name = "proj-%s-%s" % (base, hashlib.sha1(path.encode("utf-8")).hexdigest()[:4])
+    name = "proj-%s-%s" % (base, hashlib.sha1(path.encode("utf-8", "surrogateescape")).hexdigest()[:4])
     return name + ("-" + session_id[:8] if session_id else "")
 
 
@@ -38,9 +38,16 @@ def _then_shell(inner):
 
 def zellij_attach(name, path):
     """Join a live zellij session; if it has exited meanwhile, do not resurrect it:
-    run the picker in a plain shell instead."""
+    run the picker in a plain shell instead. "Exited" is only the trailing "(EXITED ...)"
+    marker after the name, the same rule as agent._ZJ_EXITED_RE (tests/test_exited_equivalence.py
+    checks both give the same answer). ValueError for a name that
+    starts with "-": zellij would read it as an option."""
+    if name.startswith("-"):
+        raise ValueError("session name starts with '-': %r" % name)
     live = ("zellij list-sessions -n 2>/dev/null | "
-            "awk -v n=%s '$1 == n && !/EXITED/ {f = 1} END {exit !f}'" % q(name))
+            "awk -v n=%s '$1 == n {r = substr($0, length($1) + 1); "
+            "if (r !~ /\\(EXITED([^A-Za-z0-9_()][^()]*)?\\)[ \t\\r\\f\\v]*$/) f = 1} "
+            "END {exit !f}'" % q(name))
     return "if %s; then exec zellij attach %s; else cd %s && %s; fi" % (
         live, q(name), q(path), _then_shell(PICKER))
 
@@ -48,7 +55,7 @@ def zellij_attach(name, path):
 def zellij_new_tab(path, title, run=subprocess.run):
     """Inside zellij: a new tab in the current session runs the picker; proj stays open."""
     shell = os.environ.get("SHELL") or "/bin/sh"
-    run(["zellij", "action", "new-tab", "--cwd", path, "--name", title, "--",
+    run(["zellij", "action", "new-tab", "--cwd", path, "--name", termtext.one_line(title), "--",
          shell, "-lic", '%s; exec "$SHELL" -l' % PICKER], check=True)
 
 
@@ -56,16 +63,20 @@ PROJ_SESSION_PREFIX = "proj-"
 _SESSION_NAME_RE = re.compile(r"^proj-[A-Za-z0-9._-]+$")
 
 
-def proj_session_name(project_name):
-    """The one zellij session proj creates for a project: proj-<project name made safe>.
-    When making the name safe lost something (replaced or stripped characters, or cut it
-    short), a short hash of the original keeps different projects apart: proj-<name>-ab12.
-    The "/" of a nested project becomes "-" without counting as a loss."""
-    flat = project_name.replace("/", "-")
+def proj_session_name(name, path, home):
+    """The one zellij session proj creates for a project: proj-<name made safe>.
+    A short hash of the absolute path, proj-<name>-ab12, is appended whenever the name
+    alone could be shared with another project: it contains "/" (work/foo-bar and
+    work-foo/bar both flatten to work-foo-bar), the project is not under `home` (the
+    name is then only its last component; an empty home counts as "not under"), or
+    making it safe lost characters (replaced, stripped or cut short)."""
+    flat = name.replace("/", "-")
     safe = re.sub(r"[^A-Za-z0-9._-]", "-", flat).lstrip(".-")
-    if safe == flat and len(safe) <= 32:
+    # the name is only unambiguous when it is exactly the path under home (same rule as
+    # ui.project_name, from the one shared function)
+    if "/" not in name and paths.rel_to_home(path, home) == name and safe == flat and len(safe) <= 32:
         return PROJ_SESSION_PREFIX + (safe or "project")
-    digest = hashlib.sha1(project_name.encode("utf-8", "surrogateescape")).hexdigest()[:4]
+    digest = hashlib.sha1(path.encode("utf-8", "surrogateescape")).hexdigest()[:4]
     return "%s%s-%s" % (PROJ_SESSION_PREFIX, (safe[:27] or "project").rstrip("-") or "project", digest)
 
 
@@ -93,9 +104,6 @@ def _kdl_str(text):
     return '"%s"' % "".join(out)
 
 
-_write_atomic = sync._write_atomic
-
-
 def zellij_new_session(path, name, layout_dir, delete_first):
     """Write the layout (tab bar, one command pane with cwd = project that runs the picker
     and then a login shell and closes when that exits, status bar) to <layout_dir>/<name>.kdl
@@ -119,7 +127,7 @@ def zellij_new_session(path, name, layout_dir, delete_first):
         "    }",
         "}", ""])
     file = os.path.join(layout_dir, name + ".kdl")
-    _write_atomic(file, layout)
+    fsutil.write_atomic(file, layout)
     create = "zellij --session %s --new-session-with-layout %s" % (q(name), q(file))
     if delete_first:
         create = "zellij delete-session %s && %s" % (q(name), create)
@@ -177,7 +185,7 @@ def applescript(cmd, title):
         "    tell current window to create tab with default profile",
         "  end if",
         "  tell current session of current window",
-        "    set name to %s" % _as_str(re.sub(r"[\r\n]", " ", title)),
+        "    set name to %s" % _as_str(termtext.one_line(re.sub(r"[\r\n]", " ", title))),
         "    write text %s" % _as_str(cmd),
         "  end tell",
         "end tell",

@@ -13,6 +13,16 @@ EVIL = '<script>alert(1)</script><img src=x onerror=1>'
 EVIL2 = '"onerror=1>javascript:alert(1)'
 
 
+HOME = "/home/u"  # placeholder home; the module's autouse fixture makes it the HOME in effect
+
+
+@pytest.fixture(autouse=True)
+def fixed_home(monkeypatch):
+    """web renders names relative to the HOME at render time: pin it inside each case instead
+    of depending on the outer environment."""
+    monkeypatch.setenv("HOME", HOME)
+
+
 def home():
     return os.path.expanduser("~")
 
@@ -269,14 +279,9 @@ def test_waiting_remote_attach_shown_verbatim():
     assert "ssh -t em-host zellij attach x" in web.render_columns(mkboard(waiting=[w]))
 
 
-HOME_AT_IMPORT = os.path.expanduser("~")
-
-
-@pytest.mark.parametrize("base", ["call", "import"])
-def test_project_display_name_is_home_relative(base):
-    # "relative to home": the home in effect when rendering (HOME is reset per test by the
-    # autouse fixture) vs the home at import time; the spec does not say which one is meant.
-    root = home() if base == "call" else HOME_AT_IMPORT
+def test_project_display_name_is_home_relative():
+    # "relative to home": the home in effect when rendering
+    root = home()
     w = sess("w", "waiting", question="q?", idle_since=NOW - 60, project=root + "/dev/deep/proj-x")
     out = web.render_columns(mkboard(waiting=[w]))
     assert "dev/deep/proj-x" in out
@@ -389,8 +394,8 @@ def test_ended_wait_total_none_renders_dash_not_zero():
 
 
 def test_top_todos_column_uses_home_relative_project_and_title():
-    top = [{"host": "s-host", "project": HOME_AT_IMPORT + "/dev/projdeck", "title": "FIX-THE-THING", "flag": True},
-           {"host": "s-host", "project": HOME_AT_IMPORT + "/quant", "title": "SECOND-THING", "flag": False}]
+    top = [{"host": "s-host", "project": home() + "/dev/projdeck", "title": "FIX-THE-THING", "flag": True},
+           {"host": "s-host", "project": home() + "/quant", "title": "SECOND-THING", "flag": False}]
     out = web.render_columns(mkboard(top=top))
     assert "FIX-THE-THING" in out and "dev/projdeck" in out
     assert out.index("FIX-THE-THING") < out.index("SECOND-THING")
