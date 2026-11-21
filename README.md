@@ -253,3 +253,14 @@ python3 -m pytest -q tests
 The mutation meta-tests (the `tests/test_*_spec.py` files that break one line in a copy of the
 tree and require a named test to fail) copy the whole tree and start a child pytest each, so
 they are skipped by default; run them with `PROJ_MUTATION_TESTS=1 python3 -m pytest -q tests`.
+
+A test that runs longer than `PROJ_TEST_TIMEOUT` seconds (default 300, `0` turns it off) is
+taken as hung: every thread's stack is printed and the run ends with exit code 1.
+
+Probes and debug scripts run outside pytest go through `scripts/sandbox.py`, which gives them
+a temp `HOME`, `PROJ_CACHE` and `PROJ_CONFIG` and stand-ins for ssh, zellij, tmux, claude, fzf
+and systemctl, so they never read your real config or reach a real host:
+
+```bash
+python3 scripts/sandbox.py [--config fixture.json] -- python3 -m projdeck report
+```

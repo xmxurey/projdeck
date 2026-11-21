@@ -1,8 +1,11 @@
+import faulthandler
 import json
 import os
 import subprocess
 
 import pytest
+
+from tests import _stubs
 
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
            "GIT_COMMITTER_EMAIL": "t@t"}
@@ -26,22 +29,32 @@ def isolated_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
 
 
-# Programs the tests must never reach for real: program name -> what its stand-in does.
-# ("print", text) prints text and exits 0; ("exit", code) just exits with code. Every stand-in
-# records its arguments, one call per line, in <dir>/calls (env PROJ_STUB_CALLS).
-REAL_PROGRAM_STUBS = {
-    "claude": ("print", "[]"),
-    "ssh": ("exit", 255),
-    "zellij": ("exit", 1),
-    "tmux": ("exit", 1),
-    "tailscale": ("exit", 1),
-    "systemctl": ("exit", 1),
-    "systemd-analyze": ("exit", 1),
-    "osascript": ("exit", 1),
-    "open": ("exit", 1),
-    "xdg-open": ("exit", 1),
-    "fzf": ("exit", 1),
-}
+# Programs the tests must never reach for real (shared with scripts/sandbox.py); every
+# stand-in records its arguments, one call per line, in <dir>/calls (env PROJ_STUB_CALLS).
+REAL_PROGRAM_STUBS = _stubs.REAL_PROGRAM_STUBS
+
+# A test running longer than this many seconds is taken as hung: every thread's stack goes
+# to stderr and the whole run ends (exit 1) instead of waiting forever. 0 turns it off.
+TEST_TIMEOUT = float(os.environ.get("PROJ_TEST_TIMEOUT", "300"))
+_real_stderr = None
+
+
+def pytest_configure(config):
+    # fd 2 before output capture takes it over, so a hang report reaches the terminal
+    global _real_stderr
+    _real_stderr = os.fdopen(os.dup(2), "w")
+
+
+@pytest.fixture(autouse=True)
+def hang_watchdog():
+    if TEST_TIMEOUT <= 0:
+        yield
+        return
+    faulthandler.dump_traceback_later(TEST_TIMEOUT, exit=True, file=_real_stderr)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.fixture(autouse=True)
@@ -51,13 +64,8 @@ def no_real_programs(tmp_path_factory, monkeypatch):
     d = tmp_path_factory.mktemp("fakeremote")
     cdir = tmp_path_factory.mktemp("fakeclaude")  # claude lives apart: tests inspect its dir name
     calls = d / "calls"
-    for prog, (kind, arg) in REAL_PROGRAM_STUBS.items():
-        body = "#!/bin/sh\necho \"%s $*\" >> \"%s\"\n" % (prog, calls)
-        body += "echo '%s'\n" % arg if kind == "print" else "exit %d\n" % arg
-        stub = (cdir if prog == "claude" else d) / prog
-        stub.write_text(body)
-        stub.chmod(0o755)
-    monkeypatch.setenv("PATH", os.pathsep.join([str(d), str(cdir), os.environ["PATH"]]))
+    front = _stubs.install(d, cdir, calls)
+    monkeypatch.setenv("PATH", os.pathsep.join(front + [os.environ["PATH"]]))
     monkeypatch.setenv("PROJ_STUB_CALLS", str(calls))
     monkeypatch.setenv("PROJ_STUB_DIRS", os.pathsep.join([str(d), str(cdir)]))
 
