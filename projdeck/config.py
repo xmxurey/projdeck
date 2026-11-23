@@ -132,6 +132,8 @@ def check_host(h, i, path):
         raise bad("tmux", 'true, false or "always"')
     if "mux" in h and not valid_mux(h["mux"]):
         raise bad("mux", '"zellij", "tmux" or false')
+    if "brief" in h and not isinstance(h["brief"], bool):
+        raise bad("brief", "true or false")
 
 
 def config_path():

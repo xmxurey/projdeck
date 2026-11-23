@@ -6,12 +6,15 @@ import subprocess
 import sys
 import time
 
-from projdeck import paths
+from projdeck import board, paths
 from projdeck.board import cells, clip_total, host_freshness
 from projdeck.model import ROW_DEFAULTS, find_row, TIER_ICON, git_errors, git_failed, human_age, latest_session, n_suspicious, span, sync_age
 from projdeck.termtext import has_surrogates, one_line as _one_line, safe as _safe
 
 SEP = "\t"
+# path field of a brief host's summary line: real paths are absolute or hex:-encoded
+BRIEF_FIELD = "brief:"
+STATE_ERROR_MARK = "⚠ 状态读取失败"  # brief host session listed because its state was unreadable
 PROJECT_KEYS = ["ctrl-r", "ctrl-y", "ctrl-f", "ctrl-x", "ctrl-u", "ctrl-l", "ctrl-v"]
 PROJECT_HEADER = ("Enter: resume · ^R: resume latest · ^Y: pick session · ^F: search prompts · "
                   "^X: clean · ^U: sync · ^L: backlog · ^V: dashboard")
@@ -29,10 +32,12 @@ YELLOW = "\x1b[33m"
 TL_CELLS, TL_STEP = 24, 450          # 24 cells x 7.5 min = the last 3 hours
 HOST_ERROR_CHARS = 60                # the first live error of a host, cut to this in the header
 EMPTY_CELL = (42, 47, 55)
-CELL_RGB = {"busy": (111, 155, 203), "sub": (169, 198, 228), "wait": (240, 163, 94),
-            "wait_now": (201, 132, 70)}
+CELL_RGB = {"busy": (57, 135, 229), "sub": (25, 158, 112), "wait": (217, 89, 38),
+            "wait_now": (217, 89, 38)}
 WAIT_RGB, DOING_RGB, GREY_RGB, DONE_RGB, STUCK_RGB = (
-    (240, 163, 94), (141, 180, 220), (128, 128, 128), (47, 125, 91), (192, 57, 43))
+    (217, 89, 38), (57, 135, 229), (128, 128, 128), (12, 163, 12), (230, 103, 103))
+CELL_GLYPH = {"wait_now": "▒"}       # same colour as "wait", told apart by texture
+STUCK_GLYPH = "!"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -165,12 +170,12 @@ def _fg(rgb, text):
 
 
 def spark(cells_):
-    """One ▆ per cell, coloured by kind (None = empty cell)."""
-    return "".join(_fg(CELL_RGB.get(k, EMPTY_CELL), "▆") for k in cells_)
+    """One character per cell (▆, or ▒ for wait_now), coloured by kind (None = empty cell)."""
+    return "".join(_fg(CELL_RGB.get(k, EMPTY_CELL), CELL_GLYPH.get(k, "▆")) for k in cells_)
 
 
 def task_bar(tasks):
-    """Segmented task bar '■■▣□ 2/4 T07'; over 16 tasks just '12/21 ▣T13'.
+    """Segmented task bar '■■▣□ 2/4 T07'; over 16 tasks just '12/21 ▣T13' ('!T13' when stuck); stuck cells are a red '!'.
     `tasks` is the session's task dict (items, current) or a bare item list."""
     items = tasks.get("items") if isinstance(tasks, dict) else tasks
     if not items:
@@ -183,10 +188,10 @@ def task_bar(tasks):
         mark = ""
         if current:
             stuck = any(i.get("status") == "stuck" for i in items if _one_line(i.get("id")) == current)
-            mark = " " + _fg(STUCK_RGB if stuck else DOING_RGB, "▣") + current
+            mark = " " + (_fg(STUCK_RGB, STUCK_GLYPH) if stuck else _fg(DOING_RGB, "▣")) + current
         return "%d/%d%s" % (done, len(items), mark)
     glyph = {"done": _fg(DONE_RGB, "■"), "doing": _fg(DOING_RGB, "▣"),
-             "stuck": _fg(STUCK_RGB, "▣")}
+             "stuck": _fg(STUCK_RGB, STUCK_GLYPH)}
     bar = "".join(glyph.get(i.get("status"), _fg(GREY_RGB, "□")) for i in items)
     return "%s %d/%d%s" % (bar, done, len(items), " " + current if current else "")
 
@@ -218,9 +223,10 @@ def _marker(live, r):
     return TIER_ICON[r["tier"]]
 
 
-def project_line(r, now, order=None, show_host=False, live=None):
-    """live: the board session that speaks for this project ({} when it has none), or None
-    for the plain line without timeline."""
+def project_flags(r, git=None):
+    """The marks after a project's name (▶ ± ↑ ⊘ ⚑ 💬 git? non-git). git: None judges git
+    failure from the row (the project line), True / False is the caller's verdict (the
+    summary preview gives a session's git_failed, the same source as the summary line)."""
     g = r.get("git") or {}
     flags = []
     if live_flag(r):
@@ -235,11 +241,18 @@ def project_line(r, now, order=None, show_host=False, live=None):
         flags.append("⚑%d" % n_suspicious(r))
     if r["sessions"]:
         flags.append("💬%d" % len(r["sessions"]))
-    if r["exists"] and not r.get("uncollected"):  # uncollected: git unknown
-        if git_failed(r):
-            flags.append("git?")
-        elif not r.get("git"):
-            flags.append("non-git")
+    known = r["exists"] and not r.get("uncollected")  # uncollected: git unknown
+    if (known and git_failed(r)) if git is None else git:
+        flags.append("git?")
+    elif known and not r.get("git") and not git_failed(r):  # no git and no git error
+        flags.append("non-git")
+    return flags
+
+
+def project_line(r, now, order=None, show_host=False, live=None):
+    """live: the board session that speaks for this project ({} when it has none), or None
+    for the plain line without timeline."""
+    flags = project_flags(r)
     if show_host:
         flags.insert(0, "%s@%s%s" % (DIM, _one_line(r["host"]), RESET))
     if live is None:
@@ -289,15 +302,20 @@ def _minimal_row(host, path, session, now):
 URGENCY = {"waiting": 0, "sub": 1, "busy": 1, "idle": 2}
 
 
-def _speakers(board):
-    """(host, project) -> the most urgent trusted session; plus the stale-host ones."""
+def _speakers(bd):
+    """(host, project) -> the trusted session that speaks for it: one not folded into its
+    host's summary line first, then the most urgent; plus the stale-host ones. A folded
+    session speaks only when every trusted session of the project is folded."""
     fresh, stale = {}, {}
+
+    def rank(s):
+        return board.folded(bd, s), URGENCY.get(s.get("state"), 2)
     for key in ("waiting", "busy", "idle"):
-        for s in board.get(key) or ():
+        for s in bd.get(key) or ():
             k = (s.get("host"), s.get("project"))
-            if k not in fresh or URGENCY.get(s.get("state"), 2) < URGENCY.get(fresh[k].get("state"), 2):
+            if k not in fresh or rank(s) < rank(fresh[k]):
                 fresh[k] = s
-    for s in board.get("stale_host_sessions") or ():
+    for s in bd.get("stale_host_sessions") or ():
         k = (s.get("host"), s.get("project"))
         if k not in fresh and k not in stale:
             stale[k] = dict(s, age=s.get("age"))  # None stays unknown
@@ -310,10 +328,61 @@ def preview_target(board, rows, host, path, now):
     nothing knows the project."""
     fresh, stale = _speakers(board)
     live = fresh.get((host, path)) or stale.get((host, path))
+    return _project_row(rows, host, path, live, now), live
+
+
+def _project_row(rows, host, path, session, now):
+    """The cached row of host:path, or, for a project only the live data knows (it has a
+    session), a minimal one; None when neither knows it."""
     row = find_row(rows, host, path)
-    if row is None and live:
-        row = _minimal_row(host, path, live, now)
-    return row, live
+    if row is None and session:
+        row = _minimal_row(host, path, session, now)
+    return row
+
+
+def _summary_line(bd, entry, now):
+    """fzf line of a brief host's summary: [host, BRIEF_FIELD, blue ◉ + brief_label]; all
+    yellow with the data time when the host's data is not fresh."""
+    label = _one_line(board.brief_label(entry))
+    age = board.brief_host_age(bd, entry["host"], now)
+    if age:
+        display = YELLOW + "◉ %s · 数据 %s（%s）" % (label, _clock(age["at"]), _ago(age["age"])) + RESET
+    else:
+        display = _fg(DOING_RGB, "◉") + " " + label
+    return SEP.join([entry["host"], BRIEF_FIELD, display])
+
+
+def _progress_groups(bd, now, live_of, by_key, taken, line):
+    """◆ 等你 and ◉ 进行中 groups. A project whose speaking session is folded is taken (not
+    listed, not back in its host group); each brief host with folded sessions gets one
+    summary line at the end of ◉ 进行中. In both groups, the row of a brief host's project
+    holding a busy / idle session whose state could not be read ends with STATE_ERROR_MARK,
+    whichever session speaks for the project: the summary line says that session is listed
+    apart, and this row is where it is."""
+    entries = (bd.get("brief") or {}).get("hosts") or ()
+    brief_hosts = {e["host"] for e in entries}
+    errored = {(s.get("host"), s.get("project"))
+               for kind in ("busy", "idle") for s in bd.get(kind) or ()
+               if s.get("host") in brief_hosts and board.session_error(s)}
+    lines = []
+    for label, states in (("◆ 等你", ("waiting",)), ("◉ 进行中", ("sub", "busy", "idle"))):
+        progress = label == "◉ 进行中"
+        members = []
+        for state in states:
+            for k, s in live_of.items():
+                if s.get("state") == state and "age" not in s and k in by_key and k not in taken:
+                    taken.add(k)
+                    if board.folded(bd, s):
+                        continue
+                    members.append(line(by_key[k], True) + (
+                        "  " + YELLOW + STATE_ERROR_MARK + RESET if k in errored else ""))
+        if progress:
+            members += [_summary_line(bd, e, now) for e in entries
+                        if board.brief_shown(bd, e["host"])]
+        if members:
+            lines.append(_header("", label))
+            lines.extend(members)
+    return lines
 
 
 def project_lines(rows, now, board=None):
@@ -344,18 +413,9 @@ def project_lines(rows, now, board=None):
                             None if plain else live_of.get(k, {}))
 
     if not plain:
-        by_key = {(r["host"], r["path"]): r for r in rows}
         # in-progress group: sub, then busy, idle last
-        for label, states in (("◆ 等你", ("waiting",)), ("◉ 进行中", ("sub", "busy", "idle"))):
-            members = []
-            for state in states:
-                for k, s in live_of.items():
-                    if s.get("state") == state and "age" not in s and k in by_key and k not in taken:
-                        members.append(by_key[k])
-                        taken.add(k)
-            if members:
-                lines.append(_header("", label))
-                lines.extend(line(r, True) for r in members)
+        lines += _progress_groups(board, now, live_of, {(r["host"], r["path"]): r for r in rows},
+                                  taken, line)
     flagged = sorted((r for r in rows if r.get("flag") and (r["host"], r["path"]) not in taken),
                      key=lambda r: -r["activity"])
     if flagged:
@@ -374,6 +434,17 @@ def project_lines(rows, now, board=None):
 
 def _clock(ts):
     return time.strftime("%H:%M", time.localtime(ts))
+
+
+def _counts(bd):
+    """Header counts; busy and idle note each brief host's share, e.g. 进行中 3（<host> 2）."""
+    s = bd.get("summary") or {}
+    return "%s  %s  %s  ☐ 待办 %s" % (
+        _fg(WAIT_RGB, "◆") + " 等你 %d" % (s.get("waiting") or 0),
+        _fg(DOING_RGB, "◉") + " 进行中 %d%s" % (s.get("busy") or 0,
+                                              _one_line(board.brief_note(bd, "busy"))),
+        DIM + "◌" + RESET + " 空闲 %d%s" % (s.get("idle") or 0, _one_line(board.brief_note(bd, "idle"))),
+        s.get("open_todos") if s.get("open_todos") is not None else "—")
 
 
 def header_lines(board, now):
@@ -397,12 +468,7 @@ def header_lines(board, now):
             hinted = True
         segs.append(text)
     s = board.get("summary") or {}
-    counts = "%s  %s  %s  ☐ 待办 %s" % (
-        _fg(WAIT_RGB, "◆") + " 等你 %d" % (s.get("waiting") or 0),
-        _fg(DOING_RGB, "◉") + " 进行中 %d" % (s.get("busy") or 0),
-        DIM + "◌" + RESET + " 空闲 %d" % (s.get("idle") or 0),
-        s.get("open_todos") if s.get("open_todos") is not None else "—")
-    first = "proj  %s      %s" % (" · ".join(segs), counts)
+    first = "proj  %s      %s" % (" · ".join(segs), _counts(board))
     if s.get("zellij_exited_n"):
         first += " · 已退出 zellij %d（proj report 看清理命令）" % s["zellij_exited_n"]
     today = s.get("today") or {}
@@ -495,7 +561,7 @@ def _live_section(r, live, now):
         out.append(YELLOW + "该项目还没采集，按 ^U 同步（下面只有会话状态与时间线）" + RESET)
     start = now - PV_CELLS * PV_STEP
     segs = live.get("segments") or []
-    out.append("── 最近 6 小时 ── %s ─── %s ──" % (_clock(start), _clock(now)))
+    out.append(_timeline_title(start, now))
     out.append(spark(cells(segs, start, PV_CELLS, PV_STEP)))
     t = clip_total(segs, start, now)
     out.append("Claude %s · 子代理 %s · 闲置等输入 %s" % (span(t["busy"]), span(t["sub"]), span(t["wait"])))
@@ -561,6 +627,51 @@ def preview_text(r, now, live=None):
         out.extend(["", "errors:"] + ["  " + _safe(e) for e in errors])
     if live:
         out[1:1] = _live_section(r, live, now)
+    return "\n".join(out)
+
+
+def _timeline_title(start, now):
+    return "── 最近 6 小时 ── %s ─── %s ──" % (_clock(start), _clock(now))
+
+
+def _folded_session_lines(rows, s, now):
+    """One folded session in the summary preview: project · session · state and the project
+    marks (git? from the session's git_failed, as the summary line counts it), its 6h
+    timeline, its task bar and each of its warnings."""
+    host, path = s.get("host"), s.get("project") or ""
+    r = _project_row(rows, host, path, s, now)
+    if s.get("state") in ("sub", "busy"):
+        marker, word, since = _fg(DOING_RGB, "◉"), "运行中", s.get("started_at")
+    else:
+        marker, word, since = DIM + "◌" + RESET, "空闲", s.get("idle_since")
+    head = "%s %s · %s · %s %s" % (marker, _shown_name(r), _one_line(s.get("name") or s.get("title")),
+                                   word, span(now - since) if since else "—")
+    flags = project_flags(r, git=bool(s.get("git_failed")))
+    out = [head + ("  " + " ".join(flags) if flags else "")]
+    out.append(spark(cells(s.get("segments") or [], now - PV_CELLS * PV_STEP, PV_CELLS, PV_STEP)))
+    if isinstance(s.get("tasks"), dict) and not s.get("tasks_owner") and task_bar(s["tasks"]):
+        out.append(task_bar(s["tasks"]))
+    out.extend("  ⚠ " + _safe(e) for e in s.get("errors") or ())
+    return out
+
+
+def brief_preview_text(bd, rows, host, now):
+    """Preview of a brief host's summary line: the summary text, a warning when the host's
+    data is not fresh, then every session folded into it (busy first, idle after, in board
+    order), each with its 6h timeline."""
+    entry = next((e for e in (bd.get("brief") or {}).get("hosts") or () if e["host"] == host),
+                 None)
+    if entry is None:
+        return "%s：没有精简展示的会话" % _one_line(host)
+    out = [_one_line(board.brief_label(entry))]
+    age = board.brief_host_age(bd, host, now)
+    if age:
+        out.append(YELLOW + "⚠ live 数据 %s（%s），会话状态可能已过期" % (
+            _clock(age["at"]), _ago(age["age"])) + RESET)
+    out.append(_timeline_title(now - PV_CELLS * PV_STEP, now))
+    for s in list(bd.get("busy") or ()) + list(bd.get("idle") or ()):
+        if s.get("host") == host and board.folded(bd, s):
+            out.extend(_folded_session_lines(rows, s, now))
     return "\n".join(out)
 
 

@@ -47,7 +47,8 @@ ln -s ~/.fzf/bin/fzf ~/.local/bin/fzf   # any dir on PATH; or download a binary 
   (`true`; `true`, `false` or `"always"`: `true` re-attaches a proj tmux session that is
   already running, `"always"` creates one when missing, `false` uses a plain shell), `mux`
   (`"tmux"`; only `"zellij"`, `"tmux"` or `false`), `local` (a boolean), `ssh` (a non-empty
-  alias; required unless `local` is true).
+  alias; required unless `local` is true), `brief` (`false`; a boolean only, `null` is
+  refused: `true` shows this host's sessions in brief, see "Reading the dashboard").
 
 Environment variables: `PROJ_CONFIG` (config file, default `~/.config/proj/config.json`) and
 `PROJ_CACHE` (cache directory, default `~/.cache/proj`).
@@ -170,6 +171,29 @@ by more than 120 seconds, so keep remote clocks synchronized (NTP).
 
 Tip: set `"cleanupPeriodDays": 365` in Claude Code settings, otherwise transcripts older
 than 30 days are deleted and can't be listed.
+
+## Reading the dashboard
+
+Timeline cells (web and terminal): blue is Claude working, green a sub-agent, orange idle and
+waiting for input. "Still waiting for you right now" has the same orange and is told apart by
+texture: diagonal hatching on the web, `▒` instead of `▆` in the terminal. Heat cells are
+purple, light to dark for 1–2, 3–9, 10–29 and 30+ commits; grey is 0 commits, a hollow cell
+means the read failed.
+
+Task bar: `■` done (green), `▣` in progress (blue), a red `!` stuck, grey not started. Stuck
+is also a shape: on the web that cell is taller than the others. Over 16 tasks the bar
+shortens to `12/21 ▣T13`, and to `12/21 !T13` when the current task is stuck.
+
+A host with `"brief": true` in its config entry (for example `em-host`) is shown in brief.
+Its busy and idle sessions fold into one summary line per host (`em-host · 进行中 4 · 空闲 1`);
+sessions waiting for you, sessions whose state could not be read and sessions without an id
+stay listed one by one. In the terminal the row of a project holding such an unreadable session
+ends with `⚠ 状态读取失败`, whichever session the row shows. If the host's data is
+getting old the summary line turns yellow and says when it was taken. On the web the summary is
+an expandable block and the host's lanes sit in a collapsed block; in the terminal there is no
+new key: put the cursor on the summary line (its path field is `brief:`) and the preview lists
+the folded sessions and their timelines. Enter, `^X`, `^R` and `^Y` do nothing on that line.
+The status-line push to the host is unchanged.
 
 ## proj serve
 

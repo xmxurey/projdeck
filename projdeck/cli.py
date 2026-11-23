@@ -334,6 +334,8 @@ def cmd_browse(cfg, args):
             except ui.Cancelled:
                 continue
             last = (host, path)
+        if path == ui.BRIEF_FIELD:
+            continue  # a brief host's summary line: no project to act on, like a host header
         r = model.find_row(rows, host, path)
         if r is None:
             if host and path:  # only in the live data: no row to act on
@@ -585,6 +587,10 @@ def cmd_preview(cfg, args):
     now = time.time()
     host, path = args.host.rstrip("\t"), ui.from_field(args.path.rstrip("\t"))
     caches = sync.load_caches(cfg)
+    if path == ui.BRIEF_FIELD:
+        bd = board.build(caches, sync.load_lives(cfg), cfg, now)
+        print(ui.brief_preview_text(bd, model.rows(caches, cfg, now), host, now))
+        return 0
     if not path:
         print(ui.host_preview_text(host, caches, model.rows(caches, cfg, now), now))
         return 0

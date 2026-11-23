@@ -49,8 +49,9 @@ def test_toplevel_keys_and_empty_lists():
     b = board.build([], [], cfg("a"), NOW)
     assert set(b) == {"hosts", "summary", "waiting", "busy", "idle", "ended_today", "stale",
                       "stale_host_sessions", "lanes", "top_todos", "backlogs", "tiles",
-                      "unknown", "built_at"}  # F3, F4
-    assert b["lanes"]["rows"] == [] and b["lanes"]["more"] == 0
+                      "unknown", "built_at", "brief"}  # F3, F4
+    assert b["lanes"]["rows"] == [] and b["lanes"]["more"] == 0 and b["lanes"]["brief"] == []
+    assert b["brief"] == {"hosts": [], "keys": []}
     assert b["top_todos"] == b["backlogs"] == b["tiles"] == []
 
 
@@ -142,7 +143,7 @@ def test_hosts_entries():
     for h in hosts:
         assert set(h) == {"name", "live_at", "collect_at", "stale_since", "error", "source",
                           "local", "errors", "live_unknown", "zellij_checked",
-                          "live_synced_at", "freshness"}  # F3
+                          "live_synced_at", "freshness", "brief"}  # F3
     assert hosts[0]["live_at"] == NOW - 10 and hosts[0]["collect_at"] == NOW - 100
     assert hosts[0]["source"] == "claude agents"
     assert hosts[1]["live_at"] is None and hosts[1]["error"] == "boom"

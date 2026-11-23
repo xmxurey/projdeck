@@ -91,7 +91,7 @@ def test_busy_tasks_progress_and_fold():
     html = web.render_columns(board(busy=[sess("a", tasks=tasks)]))
     bc = cards(html, "card-busy")[0]
     assert "6 / 8 · 当前 T07" in bc
-    assert len(re.findall(r'<rect class="task-', bc)) == 8
+    assert len(re.findall(r'<rect class="task-cell task-', bc)) == 8
     for k in ("task-done", "task-doing", "task-todo"):
         assert k in bc
     assert "✓" in bc and "◉" in bc and "○" in bc

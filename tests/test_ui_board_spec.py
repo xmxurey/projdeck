@@ -16,9 +16,9 @@ NOW = DAY0 + 23 * 3600
 CFG = {"hosts": [{"name": "loc", "local": True}, {"name": "s-host", "ssh": "s-host"},
                  {"name": "em", "ssh": "em"}]}
 
-ORANGE, BLUE = (240, 163, 94), (141, 180, 220)
-C_BUSY, C_SUB, C_WAIT, C_NOW, C_EMPTY = ((111, 155, 203), (169, 198, 228), (240, 163, 94),
-                                         (201, 132, 70), (42, 47, 55))
+ORANGE, BLUE = (217, 89, 38), (57, 135, 229)
+C_BUSY, C_SUB, C_WAIT, C_NOW, C_EMPTY = ((57, 135, 229), (25, 158, 112), (217, 89, 38),
+                                         (217, 89, 38), (42, 47, 55))
 KIND_COLOR = {"busy": C_BUSY, "sub": C_SUB, "wait": C_WAIT, "wait_now": C_NOW, None: C_EMPTY}
 
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
@@ -90,11 +90,11 @@ def hdr(lines, text):
 
 
 def colors_of_blocks(raw):
-    """Foreground rgb in force at each ▆ of the raw string."""
+    """Foreground rgb in force at each ▆ or ▒ of the raw string."""
     out, cur = [], None
     pos = 0
-    for m in re.finditer(r"\x1b\[([0-9;]*)m|▆", raw):
-        if m.group(0) == "▆":
+    for m in re.finditer(r"\x1b\[([0-9;]*)m|[▆▒]", raw):
+        if m.group(0) in ("▆", "▒"):
             out.append(cur)
         else:
             mm = re.search(r"38;2;(\d+);(\d+);(\d+)", m.group(1))
@@ -238,7 +238,7 @@ def test_cells_colors_match_mockup_fixture():
 
 def test_spark_renders_cells():
     out = ui.spark(["busy", None, "sub", "wait", "wait_now"])
-    assert plain(out) == "▆" * 5
+    assert plain(out) == "▆▆▆▆▒"
     assert colors_of_blocks(out) == [C_BUSY, C_EMPTY, C_SUB, C_WAIT, C_NOW]
     assert plain(ui.spark([])) == ""
 
@@ -268,10 +268,10 @@ def test_task_bar_boundary_16_vs_17():
     assert seventeen == "5/17 ▣T06"
 
 
-def test_task_bar_stuck_is_red_block_and_empty_is_blank():
+def test_task_bar_stuck_is_red_bang_and_empty_is_blank():
     out = ui.task_bar(items(1, "T02", 0, n_stuck=1))
-    assert plain(out).startswith("■▣▣")
-    i = out.rindex("▣")  # the stuck cell (the doing cell comes before it)
+    assert plain(out).startswith("■▣!")
+    i = out.rindex("!")  # the stuck cell (the doing cell comes before it)
     cur = None
     for m in SGR.finditer(out[:i]):
         mm = re.search(r"38;2;(\d+);(\d+);(\d+)", m.group(1))
@@ -279,7 +279,7 @@ def test_task_bar_stuck_is_red_block_and_empty_is_blank():
             cur = tuple(int(x) for x in mm.groups())
         elif m.group(1) in ("", "0"):
             cur = None
-    assert cur == (192, 57, 43)
+    assert cur == (230, 103, 103)
     assert plain(ui.task_bar([])).strip() == ""
     assert plain(ui.task_bar(None)).strip() == ""
 

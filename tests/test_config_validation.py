@@ -88,3 +88,21 @@ def test_older_abc_names_the_option(tmp_path, monkeypatch):
 def test_mux_must_be_a_real_bool_or_name(tmp_path, monkeypatch, capsys, mux):
     rc, err = run(tmp_path, monkeypatch, capsys, {"hosts": [dict(GOOD_HOST, mux=mux)]})
     assert rc == 2 and "hosts[0].mux" in err and "s-host" not in err
+
+
+@pytest.mark.parametrize("brief", [1, 0, "yes", None, []])
+def test_brief_must_be_a_real_bool(tmp_path, monkeypatch, capsys, brief):
+    cfg = {"hosts": [{"name": "s-host", "ssh": "secret-alias-x", "roots": ["/home/u/secret"],
+                      "brief": brief}]}
+    rc, err = run(tmp_path, monkeypatch, capsys, cfg)
+    assert rc == 2 and "hosts[0].brief" in err
+    assert "secret-alias-x" not in err and "/home/u/secret" not in err and "s-host" not in err
+
+
+@pytest.mark.parametrize("host", [
+    dict(GOOD_HOST, brief=True), dict(GOOD_HOST, brief=False), dict(GOOD_HOST)])
+def test_brief_bool_or_absent_loads_and_is_kept(tmp_path, host):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"hosts": [host]}))
+    loaded = config.load_config(str(p))["hosts"][0]
+    assert loaded.get("brief") == host.get("brief")

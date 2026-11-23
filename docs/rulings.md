@@ -93,6 +93,10 @@
   - 出错的进行中会话不折叠，单独显示；实现主机数据过期时，摘要行标黄并写明数据时间；
   - 网页：折叠行是一个可展开的区块，泳道收进「em-host 的 N 条泳道」区块；
   - 终端：不加新快捷键，光标移到摘要行时，预览区列出被折叠的会话和它们的时间线。
-- **代码落点**：待 run 实现时补上。
+- **代码落点**：
+  - `projdeck/board.py`：`brief_fold`（折叠的键集合和计数，存进 `board["brief"]`）、`folded`（折叠判定的唯一入口，只读 `board["brief"]["keys"]`）、`session_error`（出错 = `state_error is True`）、`brief_label`（摘要行文字）、`brief_note`（页头括注）、`brief_age`（数据过期时间，只经 `host_freshness`）、`brief_shown`（这台主机画不画摘要块/摘要行，按有没有会话 `folded` 为真判定）、`brief_host_age`（按主机名在 `board["hosts"]` 里找条目再调 `brief_age`，找不到抛 `LookupError`）；网页和终端都经 `board.` 调这些函数；泳道分流在 `build_lanes` 构建时经 `folded` 完成；
+  - `projdeck/agent.py`：会话字段 `state_error`；
+  - `projdeck/web.py`：折叠区块、页头括注、「的 N 条泳道」区块；`projdeck/ui.py`：摘要行（`BRIEF_FIELD`）、预览、行尾「⚠ 状态读取失败」；`projdeck/cli.py`：摘要行上的按键不动作；
+  - 守卫 G16：`tests/test_one_definition.py`、`tests/test_brief_chain.py`，见 docs/dev/guards.md。
 - **为什么它不是 bug**：实现主机的「进行中」会话没有逐条列出，是有意的。
 - **复议条件**：主机分工改变，或用户改为主要在实现主机上操作。

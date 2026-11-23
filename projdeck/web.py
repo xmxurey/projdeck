@@ -7,6 +7,7 @@ import os
 import re
 import time
 
+from projdeck import board  # D7 verdicts are asked as board.<fn>, never imported by name
 from projdeck.board import LIVE_LABEL_SECONDS, TOP_MARK, UNSAFE_NAME, host_freshness
 from projdeck.model import human_age, span
 from projdeck.paths import rel_to_home
@@ -15,7 +16,12 @@ from projdeck.vendor.webkit.webkit import h, layout
 SEG_CLASS = {"busy": "busy", "sub": "sub", "wait": "wait", "wait_now": "wait-now"}
 SEG_LABEL = {"busy": "Claude 自己在干活", "sub": "子代理在干活",
              "wait": "闲置等输入", "wait_now": "还在闲置等输入"}
-TASK_FILL = {"done": "#2F7D5B", "doing": "#2F5D8A", "todo": "#D5D9E0", "stuck": "#C0392B"}
+TASK_STATUS = ("done", "doing", "todo", "stuck")
+HATCH_ID = "hatch-wait-now"
+HATCH_DEFS = ('<svg class="svg-defs" width="0" height="0" aria-hidden="true" focusable="false">'
+              '<defs><pattern id="%s" width="6" height="6" patternUnits="userSpaceOnUse" '
+              'patternTransform="rotate(45)"><line class="hatch-line" x1="0" y1="0" x2="0" y2="6"/>'
+              '</pattern></defs></svg>' % HATCH_ID)
 TASK_MARK = {"done": "✓", "doing": "◉", "todo": "○", "stuck": "!"}
 FOLD_OVER = 12
 # attach is empty outside zellij/tmux, and for a zellij session whose name starts with "-"
@@ -82,11 +88,9 @@ def _lane_label(row, name):
     return project_name(row.get("project")), "%s · %s" % (name or "", state)
 
 
-def render_timeline(board):
-    lanes = board.get("lanes") or {}
-    start, end = lanes.get("start") or 0, lanes.get("end") or 1
-    rows = lanes.get("rows") or []
-    more = lanes.get("more") or 0
+def _lanes_svg(bd, rows, start, end, label):
+    """One swim-lane chart (the main one, or a brief host's block); bd is only read for names.
+    Takes no parameter called board: that name is the module whose verdicts web asks."""
     width = max(1, end - start)
     plot_w = TL_W - TL_LABEL_W - TL_RIGHT_W
 
@@ -94,9 +98,8 @@ def render_timeline(board):
         return TL_LABEL_W + (min(max(t, start), end) - start) / width * plot_w
 
     height = AXIS_H + LANE_H * max(1, len(rows)) + 4
-    out = ['<section id="timeline">', "<h2>今天的会话都在干什么</h2>",
-           '<svg class="timeline-svg" viewBox="0 0 %d %d" width="100%%" role="img" '
-           'aria-label="泳道时间线">' % (TL_W, height)]
+    out = ['<svg class="timeline-svg" viewBox="0 0 %d %d" width="100%%" role="img" '
+           'aria-label="%s">' % (TL_W, height, h(label))]
     t = start - start % 3600
     while t <= end:
         if t >= start:
@@ -107,7 +110,7 @@ def render_timeline(board):
         t += 3600
     for i, row in enumerate(rows):
         y = AXIS_H + i * LANE_H
-        name = _name_of(board, row.get("session_id"), row.get("host"))
+        name = _name_of(bd, row.get("session_id"), row.get("host"))
         proj, sub = _lane_label(row, name)
         out.append('<g class="lane lane-%s">' % h(row.get("state")))
         out.append('<line class="lane-sep" x1="0" y1="%d" x2="%d" y2="%d" stroke="#F1F3F6"/>'
@@ -124,11 +127,15 @@ def render_timeline(board):
             out.append('<rect class="seg seg-%s %s" x="%.1f" y="%d" width="%.1f" height="16" rx="2">'
                        '<title>%s</title></rect>'
                        % (cls, cls, x(a), y + 6, max(1.0, x(b) - x(a)), h(title)))
+            if kind == "wait_now":
+                out.append('<rect class="seg-hatch" fill="url(#%s)" pointer-events="none" x="%.1f" y="%d" '
+                           'width="%.1f" height="16" rx="2"/>'
+                           % (HATCH_ID, x(a), y + 6, max(1.0, x(b) - x(a))))
         for ts in row.get("commits") or ():
-            out.append('<polygon class="mark mark-commit" fill="#1A1D21" points="%s">'
+            out.append('<polygon class="mark mark-commit" points="%s">'
                        '<title>提交 %s</title></polygon>' % (_diamond(x(ts), y + 30), h(_clock(ts))))
         for tid, ts in row.get("merges") or ():
-            out.append('<polygon class="mark mark-merge" fill="#2F7D5B" points="%s">'
+            out.append('<polygon class="mark mark-merge" points="%s">'
                        '<title>任务合并 %s %s</title></polygon>'
                        % (_diamond(x(ts), y + 30), h(tid), h(_clock(ts))))
             out.append('<text class="mark-label" x="%.1f" y="%d" font-size="10">%s</text>'
@@ -144,15 +151,36 @@ def render_timeline(board):
     out.append('<line class="now-line" x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="#C0392B" '
                'stroke-width="1.5"><title>现在</title></line>' % (now_x, AXIS_H - 4, now_x, height))
     out.append("</svg>")
+    return "\n".join(out)
+
+
+def render_timeline(board):
+    lanes = board.get("lanes") or {}
+    start, end = lanes.get("start") or 0, lanes.get("end") or 1
+    out = ['<section id="timeline">', HATCH_DEFS, "<h2>今天的会话都在干什么</h2>",
+           _lanes_svg(board, lanes.get("rows") or [], start, end, "泳道时间线")]
+    more = lanes.get("more") or 0
     if more > 0:
         out.append('<p class="timeline-more">另有 %d 个会话</p>' % more)
+    for blk in lanes.get("brief") or ():  # lanes of folded sessions, one block per brief host
+        host = blk.get("host")
+        out.append('<details class="brief-lanes" data-key="brief-lanes-%s"><summary>%s 的 %d 条泳道'
+                   '</summary>%s%s</details>'
+                   % (h(host), h(host), blk["n"],
+                      _lanes_svg(board, blk.get("rows") or [], start, end, "%s 的泳道" % host),
+                      '<p class="timeline-more">另有 %d 个会话</p>' % blk["more"]
+                      if blk.get("more") else ""))
     out.append('<ul class="legend">')
     for kind in ("busy", "sub", "wait", "wait_now"):
         out.append('<li><svg width="14" height="10" viewBox="0 0 14 10"><rect class="%s" width="14" '
-                   'height="10" rx="2"/></svg> %s</li>' % (SEG_CLASS[kind], h(SEG_LABEL[kind])))
-    out.append('<li><svg width="10" height="10" viewBox="0 0 10 10"><polygon fill="#1A1D21" '
+                   'height="10" rx="2"/>%s</svg> %s</li>'
+                   % (SEG_CLASS[kind],
+                      '<rect class="seg-hatch" fill="url(#%s)" pointer-events="none" width="14" '
+                      'height="10" rx="2"/>' % HATCH_ID if kind == "wait_now" else "",
+                      h(SEG_LABEL[kind])))
+    out.append('<li><svg width="10" height="10" viewBox="0 0 10 10"><polygon class="mark-commit" '
                'points="5,0 10,5 5,10 0,5"/></svg> 提交</li>')
-    out.append('<li><svg width="10" height="10" viewBox="0 0 10 10"><polygon fill="#2F7D5B" '
+    out.append('<li><svg width="10" height="10" viewBox="0 0 10 10"><polygon class="mark-merge" '
                'points="5,0 10,5 5,10 0,5"/></svg> 任务合并</li>')
     out.append("</ul></section>")
     return "\n".join(out)
@@ -213,12 +241,12 @@ def _task_bar(items):
     cell = max(2.0, (w - gap * (n - 1)) / n)
     rects = []
     for i, it in enumerate(items):
-        st = it.get("status") if it.get("status") in TASK_FILL else "todo"
-        rects.append('<rect class="task-%s%s" fill="%s" x="%.1f" y="0" width="%.1f" height="8" rx="2">'
+        st = it.get("status") if it.get("status") in TASK_STATUS else "todo"
+        y, ht = (0, 12) if st == "stuck" else (2, 8)  # a stuck cell sticks out 2px above and below
+        rects.append('<rect class="task-cell task-%s" x="%.1f" y="%d" width="%.1f" height="%d" rx="2">'
                      '<title>%s %s</title></rect>'
-                     % (st, " done" if st == "done" else "", TASK_FILL[st], i * (cell + gap), cell,
-                        h(it.get("id")), h(it.get("title"))))
-    return ('<svg class="task-bar" viewBox="0 0 %d 8" width="100%%" role="img" aria-label="任务进度">%s</svg>'
+                     % (st, i * (cell + gap), y, cell, ht, h(it.get("id")), h(it.get("title"))))
+    return ('<svg class="task-bar" viewBox="0 0 %d 12" width="100%%" role="img" aria-label="任务进度">%s</svg>'
             % (w, "".join(rects)))
 
 
@@ -322,6 +350,32 @@ def _column(cls, title, count, cards, empty, anchor=None):
     return '<div class="column %s">%s%s</div>' % (cls, head, body)
 
 
+def _busy_column_cards(bd, now):
+    """Cards of the 进行中 column: sessions not folded in order, then one fold block per brief
+    host. bd: the board (the name `board` is the module here, see the import)."""
+    plain, by_host = [], {}
+    for s in bd.get("busy") or ():
+        (by_host.setdefault(s.get("host"), []) if board.folded(bd, s) else plain).append(
+            _busy_card(bd, s, now))
+    plain_idle = []
+    for s in bd.get("idle") or ():
+        (by_host.setdefault(s.get("host"), []) if board.folded(bd, s) else plain_idle).append(
+            _idle_card(s, now))
+    blocks = []
+    for e in (bd.get("brief") or {}).get("hosts") or ():
+        if not board.brief_shown(bd, e["host"]):  # nothing folded here (also a stale host)
+            continue
+        cards = by_host.get(e["host"]) or []
+        age = board.brief_host_age(bd, e["host"], now)
+        cls, when = "brief-fold", ""
+        if age:
+            cls += " brief-aging"
+            when = " · 数据 %s（%s 前）" % (_clock(age["at"]), span(age["age"]))
+        blocks.append('<details class="%s" data-key="brief-%s"><summary>%s</summary>%s</details>'
+                      % (cls, h(e["host"]), h(board.brief_label(e) + when), "".join(cards)))
+    return plain, plain_idle, blocks
+
+
 def render_columns(board, now=None):
     now = _now(board, now)
     waiting = board.get("waiting") or []
@@ -338,12 +392,12 @@ def render_columns(board, now=None):
             stale_busy.append(_stale_host(_busy_card(board, s, now), s))
         else:
             stale_idle.append(_stale_host(_idle_card(s, now), s))
+    busy_plain, plain_idle, blocks = _busy_column_cards(board, now)
     cols = [
         _column("col-wait", "等你", len(waiting), [_wait_card(s, now) for s in waiting] + stale_wait,
                 "没有会话在等你", "wait"),
         _column("col-busy", "进行中", len(busy),
-                [_busy_card(board, s, now) for s in busy] + stale_busy
-                + [_idle_card(s, now) for s in idle] + stale_idle,
+                busy_plain + stale_busy + plain_idle + stale_idle + blocks,
                 "没有进行中的会话", "busy"),
         _column("col-ended", "今天结束", len(ended), [_ended_card(s) for s in ended], "今天还没有结束的会话"),
         _column("col-todo col-top", "最优先待办", None, [_todo_card(t) for t in todos], "没有最优先待办"),
@@ -527,6 +581,11 @@ def _zellij_exited(summary):
             % (h(n), lines))
 
 
+def _brief_note(bd, kind):
+    note = board.brief_note(bd, kind)
+    return '<span class="counter-brief">%s</span>' % h(note) if note else ""
+
+
 def render_header(board, now=None):
     now = _now(board, now)
     summary = board.get("summary") or {}
@@ -534,18 +593,19 @@ def render_header(board, now=None):
     busy = summary.get("busy", len(board.get("busy") or ()))
     idle = summary.get("idle", len(board.get("idle") or ()))
     todos, projects = summary.get("open_todos", 0), summary.get("todo_projects", 0)
-    idle_note = '<span class="counter-note muted">◌ 空闲 %s</span>' % h(idle) if idle else ""
+    idle_note = ('<span class="counter-note muted">◌ 空闲 %s%s</span>'
+                 % (h(idle), _brief_note(board, "idle")) if idle else "")
     chips = "".join(_host_chip(x, now) for x in board.get("hosts") or ())
     return ('<div class="page-head"><div><h1>proj 看板</h1><div class="hosts">%s'
             '<span class="muted">每 5 秒刷新 · %s</span></div>%s%s%s</div>'
             '<div class="counters">'
             '<a class="counter counter-wait" href="#wait"><b>%s</b>等你回复</a>'
-            '<a class="counter counter-busy" href="#busy"><b>%s</b>进行中%s</a>'
+            '<a class="counter counter-busy" href="#busy"><b>%s</b>进行中%s%s</a>'
             '<a class="counter counter-todo" href="#todo"><b>%s</b>条待办 · %s 个项目</a>'
             '</div></div>'
             % (chips, h(_clock(now)), _board_stale(board, now), _host_errors(board.get("hosts") or ()),
                _zellij_exited(summary),
-               h(waiting), h(busy), idle_note,
+               h(waiting), h(busy), _brief_note(board, "busy"), idle_note,
                h(todos), h(projects)))
 
 

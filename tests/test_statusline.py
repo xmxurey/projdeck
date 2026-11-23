@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "contrib" / "statusline-waiting.sh"
-ORANGE = "\x1b[38;2;240;163;94m"
+ORANGE = "\x1b[38;2;217;89;38m"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
@@ -120,3 +120,10 @@ def test_no_caller_side_effects_and_fast(tmp_path):
         run(tmp_path)
         times.append(time.perf_counter() - t)
     assert statistics.median(times) < 0.2
+
+
+def test_waiting_colour_is_the_terminal_boards_wait_colour():
+    # the status line and the terminal board show the same state: one orange, not two
+    from projdeck import ui
+    assert ORANGE == "\x1b[38;2;%d;%d;%dm" % ui.WAIT_RGB
+    assert "\\u001b[38;2;%d;%d;%dm◆ 等你" % ui.WAIT_RGB in SCRIPT.read_text(encoding="utf-8")

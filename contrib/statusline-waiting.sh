@@ -1,5 +1,5 @@
 # proj_waiting_segment <session_id>
-# Prints "◆ 等你 N · <project>[ +N-1]" (truecolor orange) from
+# Prints "◆ 等你 N · <project>[ +N-1]" (truecolor orange 217;89;38, the terminal board's WAIT_RGB) from
 # ${PROJ_CACHE:-$HOME/.cache/proj}/live/statusline.state, leaving out the
 # caller's own session. Prints nothing when the file is missing, broken, or
 # its "updated" is more than 120 seconds away from now (either side).
@@ -14,7 +14,7 @@ proj_waiting_segment() {
     else
       [(.waiting // [])[] | select(.session_id != $me)] as $w
       | if ($w | length) == 0 then empty
-        else "\u001b[38;2;240;163;94m◆ 等你 \($w | length) · \($w[0].project // "" | tostring
+        else "\u001b[38;2;217;89;38m◆ 等你 \($w | length) · \($w[0].project // "" | tostring
                                                    | gsub("[\u0000-\u001f\u007f-\u009f]"; ""))"
              + (if ($w | length) > 1 then " +\($w | length - 1)" else "" end)
              + "\u001b[0m"

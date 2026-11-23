@@ -59,7 +59,7 @@ def test_two_items_one_self(tmp_path):
     r = seg(tmp_path)
     assert r.returncode == 0
     assert plain(r) == "◆ 等你 1 · quant-poly"
-    assert "240;163;94" in r.stdout
+    assert "217;89;38" in r.stdout
 
 
 def test_self_first_shows_next_project(tmp_path):

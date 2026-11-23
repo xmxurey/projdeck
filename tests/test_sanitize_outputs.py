@@ -73,7 +73,7 @@ def test_statusline_segment_strips_control_characters(tmp_path):
     env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "PROJ_CACHE": str(tmp_path)}
     out = subprocess.run(["bash", "-c", '. "%s"; proj_waiting_segment me' % SCRIPT], env=env,
                          capture_output=True, text=True).stdout
-    body = out.replace("\x1b[38;2;240;163;94m", "").replace("\x1b[0m", "")
+    body = out.replace("\x1b[38;2;217;89;38m", "").replace("\x1b[0m", "")
     assert body == "◆ 等你 1 · a]52;c;ZXZpbA==bcd"
     assert "\n" not in out
 

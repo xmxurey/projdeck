@@ -179,8 +179,9 @@ def test_stale_fold_line_counts_background_sessions():
 def test_app_css_has_no_urls_and_only_spec_colours():
     css = open(web.__file__.replace("web.py", "web/app.css")).read()
     assert "http://" not in css and "https://" not in css and "url(" not in css
-    allowed = {"#2F5D8A", "#8DB4DC", "#E8954A", "#F6CFA6", "#2F7D5B", "#F5F6F8"}
-    assert set(re.findall(r"#[0-9A-Fa-f]{3,8}\b", css)) <= allowed
+    allowed = {"#2a78d6", "#1baf7a", "#eb6834", "#008300", "#e34948", "#2F5D8A", "#F6CFA6",
+               "#B4A2EA", "#8467D6", "#5A3DB3", "#3B2585"}
+    assert {c.lower() for c in re.findall(r"#[0-9A-Fa-f]{3,8}\b", css)} <= {c.lower() for c in allowed}
 
 
 def test_unknown_page_rejected():

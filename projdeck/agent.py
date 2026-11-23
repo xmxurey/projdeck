@@ -1944,7 +1944,8 @@ def act_live(req, memo=None):
                  "last_input": _INPUT_NAMES.get(tstate.get("last_input_kind")),
                  "subagents_running": subs, "segments": segs,
                  "attach": attach.get((ag or {}).get("pid")) or "",
-                 "tasks": None, "tasks_owner": None, "errors": errors, "_mtime": mtime or 0}
+                 "tasks": None, "tasks_owner": None, "errors": errors,
+                 "state_error": read_failed is not None, "_mtime": mtime or 0}
             try:
                 if latest not in root_cache:
                     root_cache[latest] = project_root_for(latest)
@@ -1961,7 +1962,8 @@ def act_live(req, memo=None):
                  "idle_since": None, "question": "", "last_reply": "",
                  "last_human": {"ts": None, "text": ""}, "last_input": None,
                  "subagents_running": 0, "segments": [], "attach": "", "tasks": None,
-                 "tasks_owner": None, "errors": errors, "_mtime": mtime or 0}
+                 "tasks_owner": None, "errors": errors, "state_error": True,
+                 "_mtime": mtime or 0}
         sessions.append(s)
     # task ownership: one non-session source (type + path) hangs on one session
     for s in sessions:

@@ -13,7 +13,7 @@ DAY0 = calendar.timegm((2026, 11, 18, 0, 0, 0))
 NOW = DAY0 + 23 * 3600
 CFG = {"hosts": [{"name": "loc", "local": True}, {"name": "s-host", "ssh": "s-host"},
                  {"name": "em", "ssh": "em"}]}
-C_BUSY, C_EMPTY = (111, 155, 203), (42, 47, 55)
+C_BUSY, C_EMPTY = (57, 135, 229), (42, 47, 55)
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
 
 
@@ -60,8 +60,8 @@ def tasks(statuses, label="myplan", source="plan"):
 
 def blocks_colors(raw):
     out, cur = [], None
-    for m in re.finditer(r"\x1b\[([0-9;]*)m|▆", raw):
-        if m.group(0) == "▆":
+    for m in re.finditer(r"\x1b\[([0-9;]*)m|[▆▒]", raw):
+        if m.group(0) in ("▆", "▒"):
             out.append(cur)
         else:
             mm = re.search(r"38;2;(\d+);(\d+);(\d+)", m.group(1))

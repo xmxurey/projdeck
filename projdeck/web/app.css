@@ -1,12 +1,38 @@
 /* proj dashboard: styles specific to the overview page. Shared parts and SVG fill classes live in base.css. */
 :root {
-  --busy: #2F5D8A;
-  --sub: #8DB4DC;
-  --wait: #E8954A;
+  --busy: #2a78d6;
+  --sub: #1baf7a;
+  --wait: #eb6834;
   --wait-now: #F6CFA6;
-  --done: #2F7D5B;
-  --bg: #F5F6F8;
+  --done: #008300;
+  --stuck: #e34948;
+  --link: #2F5D8A;
+  --heat-1: #B4A2EA;
+  --heat-2: #8467D6;
+  --heat-3: #5A3DB3;
+  --heat-4: #3B2585;
 }
+
+a { color: var(--link); }
+
+/* idle-waiting-now shares the wait colour; hatching tells it apart */
+.wait-now { fill: var(--wait); }
+.seg-hatch { stroke: none; pointer-events: none; }
+.hatch-line { stroke: var(--card-bg); stroke-width: 2; stroke-opacity: 0.55; }
+.svg-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+/* task bar cells, stuck ones are taller (shape, not only colour) */
+.task-cell.task-done { fill: var(--done); }
+.task-cell.task-doing { fill: var(--busy); }
+.task-cell.task-stuck { fill: var(--stuck); }
+.task-cell.task-todo { fill: var(--line); }
+
+/* timeline marks */
+.mark-commit { fill: var(--text); }
+.mark-merge { fill: var(--done); }
+
+/* brief host summary with aging data */
+.brief-aging > summary { color: var(--text); background: var(--wait-now); border-left: 4px solid var(--wait); }
 
 section { margin: 0 0 var(--gap-lg); }
 section > h2 { font-size: 15px; }
@@ -60,9 +86,6 @@ section > h2 { font-size: 15px; }
 .card-attach code { display: block; }
 .card-error { font-size: var(--fs-sm); }
 .task-bar { display: block; margin: 6px 0; }
-.task-todo { fill: var(--line); }
-.task-doing { fill: var(--busy); }
-.task-stuck { fill: var(--err); }
 .tasks { list-style: none; margin: 0; padding: 0; font-size: var(--fs-sm); }
 .task-mark { display: inline-block; width: 1.2em; }
 .task-doing .task-title { font-weight: 600; }
@@ -112,10 +135,10 @@ section > h2 { font-size: 15px; }
 .tile-text { margin: 4px 0 8px; font-size: 13px; overflow-wrap: anywhere; }
 .heat-row { display: block; }
 .heat-0 { fill: var(--line); }
-.heat-1 { fill: var(--sub); fill-opacity: 0.5; }
-.heat-2 { fill: var(--sub); }
-.heat-3 { fill: var(--busy); fill-opacity: 0.7; }
-.heat-4 { fill: var(--busy); }
+.heat-1 { fill: var(--heat-1); }
+.heat-2 { fill: var(--heat-2); }
+.heat-3 { fill: var(--heat-3); }
+.heat-4 { fill: var(--heat-4); }
 .heat-empty { fill: none; stroke: var(--line); stroke-width: 1; }
 
 /* narrow screens: one column, no timeline, no ended / top-todo columns */

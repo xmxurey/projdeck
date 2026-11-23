@@ -75,17 +75,18 @@ def test_every_row_has_24_cells_with_palette():
     for ln in ui.project_lines(rows, NOW, b):
         host, path, disp = ln.split("\t", 2)
         if path:
-            assert strip_ansi(disp).count("▆") == 24
+            assert sum(strip_ansi(disp).count(g) for g in "▆▒") == 24
     disp = ui.project_lines(rows, NOW, b)[1].split("\t", 2)[2]
-    assert "\x1b[38;2;111;155;203m▆" in disp and "\x1b[38;2;240;163;94m▆" in disp
+    assert "\x1b[38;2;57;135;229m▆" in disp and "\x1b[38;2;217;89;38m▆" in disp
     assert "\x1b[38;2;42;47;55m▆" in disp
 
 
 def test_spark_colors():
     s = ui.spark(["busy", "sub", "wait", "wait_now", None])
-    assert strip_ansi(s) == "▆" * 5
-    for rgb in ("111;155;203", "169;198;228", "240;163;94", "201;132;70", "42;47;55"):
-        assert "\x1b[38;2;%sm▆" % rgb in s
+    assert strip_ansi(s) == "▆▆▆▒▆"
+    for rgb, g in (("57;135;229", "▆"), ("25;158;112", "▆"), ("217;89;38", "▆"),
+                   ("217;89;38", "▒"), ("42;47;55", "▆")):
+        assert "\x1b[38;2;%sm%s" % (rgb, g) in s
 
 
 def test_task_bar_short_and_long():
@@ -95,7 +96,12 @@ def test_task_bar_short_and_long():
     assert ui.task_bar({"items": []}) == "" and ui.task_bar(None) == ""
     stuck = items(3, 1) 
     stuck[1]["status"] = "stuck"
-    assert strip_ansi(ui.task_bar(stuck)) == "■▣□ 1/3"
+    assert strip_ansi(ui.task_bar(stuck)) == "■!□ 1/3"
+    assert "\x1b[38;2;230;103;103m!" in ui.task_bar(stuck)
+    long_stuck = items(21, 12, 13)
+    long_stuck[12]["status"] = "stuck"
+    out = ui.task_bar({"current": "T13", "items": long_stuck})
+    assert strip_ansi(out) == "12/21 !T13" and "\x1b[38;2;230;103;103m!" in out
 
 
 def test_busy_tail_task_bar_title_and_todos():

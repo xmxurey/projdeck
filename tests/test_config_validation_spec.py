@@ -296,3 +296,95 @@ def test_older_good_value_accepted(env, val):
     assert "--older" not in err, err
     assert "Traceback" not in err
     assert rc != 2
+
+
+# ---- T06: host key `brief` accepts only booleans
+BRIEF_BAD = [
+    ("int-1", 1), ("int-0", 0), ("str-yes", "yes"), ("str-sentinel", SENT + "-yes"),
+    ("null", None), ("list-empty", []), ("list-sentinel", [SENT]), ("dict", {SENT: 1}),
+    ("float", 1.0), ("str-true", "true"),
+]
+
+
+@pytest.mark.parametrize("name,val", BRIEF_BAD, ids=[b[0] for b in BRIEF_BAD])
+@pytest.mark.parametrize("cmd", [("report",), ("sync",), ("trash",)], ids=lambda c: c[0])
+def test_brief_non_bool_exits_2_naming_position(env, name, val, cmd):
+    cfg = two_hosts(env, {"brief": val, "ssh": SENT + "-alias"})
+    cfg["hosts"][1]["roots"] = [SENT + "-rootpath"]
+    rc, out, err = proj(env, cfg, *cmd)
+    assert_clean_error(rc, err, "hosts[1].brief")
+    assert "hosts[0]" not in err
+    assert SENT not in err, err  # no ssh alias, roots path or brief value echoed
+
+
+@pytest.mark.parametrize("cmd", CMDS, ids=[" ".join(c) for c in CMDS])
+def test_brief_bad_every_subcommand_exits_2(env, cmd):
+    rc, out, err = proj(env, host_mutated(env, brief="yes"), *cmd)
+    assert_clean_error(rc, err, "hosts[0].brief")
+    assert "yes" not in err.replace("hosts[0].brief", "")
+
+
+def test_brief_error_points_at_correct_index(env):
+    root = env["root"]
+    good = lambda n: {"name": n, "local": True, "roots": [root]}
+    cfg = {"hosts": [good("a"), dict(good("b"), brief=True), dict(good("c"), brief=0)]}
+    rc, out, err = proj(env, cfg, "report")
+    assert_clean_error(rc, err, "hosts[2].brief")
+    assert "hosts[1]" not in err and "hosts[0]" not in err
+
+
+def test_brief_bad_load_config_raises_value_error_without_values(env):
+    sys.path.insert(0, REPO)
+    from projdeck import config
+    env["cfg"].write_text(json.dumps({"hosts": [
+        {"name": "n", "ssh": SENT + "-alias", "roots": [SENT + "-r"], "brief": SENT + "-v"}]}))
+    with pytest.raises(ValueError) as ei:
+        config.load_config(str(env["cfg"]))
+    assert "hosts[0].brief" in str(ei.value)
+    assert SENT not in str(ei.value)
+
+
+@pytest.mark.parametrize("val", [True, False], ids=["true", "false"])
+def test_brief_bool_loads_and_is_preserved(env, val):
+    sys.path.insert(0, REPO)
+    from projdeck import config
+    env["cfg"].write_text(json.dumps(host_mutated(env, brief=val)))
+    cfg = config.load_config(str(env["cfg"]))
+    assert cfg["hosts"][0].get("brief", False) is val  # absent == false is allowed
+
+
+def test_brief_true_survives_load(env):
+    sys.path.insert(0, REPO)
+    from projdeck import config
+    env["cfg"].write_text(json.dumps(host_mutated(env, brief=True)))
+    cfg = config.load_config(str(env["cfg"]))
+    assert cfg["hosts"][0].get("brief") is True
+
+
+def test_brief_absent_loads_and_defaults_false(env):
+    sys.path.insert(0, REPO)
+    from projdeck import config
+    env["cfg"].write_text(json.dumps(base(env["root"])))
+    cfg = config.load_config(str(env["cfg"]))
+    assert cfg["hosts"][0].get("brief", False) is False
+
+
+def test_brief_per_host_independent(env):
+    sys.path.insert(0, REPO)
+    from projdeck import config
+    root = env["root"]
+    env["cfg"].write_text(json.dumps({"hosts": [
+        {"name": "a", "local": True, "roots": [root], "brief": True},
+        {"name": "b", "local": True, "roots": [root]},
+        {"name": "c", "local": True, "roots": [root], "brief": False}]}))
+    hs = config.load_config(str(env["cfg"]))["hosts"]
+    assert hs[0].get("brief") is True
+    assert hs[1].get("brief", False) is False
+    assert hs[2].get("brief", False) is False
+
+
+@pytest.mark.parametrize("val", [True, False], ids=["true", "false"])
+def test_brief_bool_report_not_a_config_error(env, val):
+    rc, out, err = proj(env, host_mutated(env, brief=val), "report")
+    assert rc != 2, err
+    assert "Traceback" not in err

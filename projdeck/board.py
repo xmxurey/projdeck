@@ -175,6 +175,8 @@ def _host_entry(name, c, lv, cfg_host, local, now):
         "live_unknown": not lv.get("collected_at") or lv.get("source") == "none",
         # zellij looked at: in scope, and the live data says what it found (None: not listed)
         "zellij_checked": config.zellij_in_scope(cfg_host) and lv.get("zellij_exited") is not None,
+        # D7: show this host's busy/idle sessions as one summary line (config key "brief")
+        "brief": cfg_host.get("brief") is True,
     }
     h["freshness"] = host_freshness(h, now)
     return h
@@ -267,6 +269,7 @@ def build(caches, lives, cfg, now):
            "ended_today": ended, "unknown": unknown, "stale": stale,
            "stale_host_sessions": stale_host}
     out["built_at"] = now
+    out["brief"] = brief_fold(out)
     out["lanes"] = build_lanes(out, commits_by_project, failed_git, now)
     exited = []
     for name in names:
@@ -284,6 +287,131 @@ def build(caches, lives, cfg, now):
     out["top_todos"] = build_top_todos(caches, backlogs)
     out["tiles"] = build_tiles(caches, out, names, cfg, now)
     return out
+
+
+# ---- D7 brief hosts: the one fold verdict, its counts, header note and summary label ----
+
+def session_error(s):
+    """The session's state could not be read (agent's state_error); a missing field is False."""
+    return s.get("state_error") is True
+
+
+_SESSION_LISTS = ("waiting", "busy", "idle", "ended_today", "unknown", "stale",
+                  "stale_host_sessions")
+
+
+def brief_fold(board):
+    """Keys of the sessions shown folded into their brief host's summary line, and per brief
+    host the counts behind it. A session folds when it is busy/idle on a brief host, its state
+    was read (not session_error) and it has an id: waiting, data gone stale, unknown and ended
+    sessions are not in busy/idle, so they always stay listed one by one. folded() reads the
+    key only, so a key that any session failing those terms also carries (say an errored twin
+    with the same id) folds none of them: such sessions count as unkeyed. Keys and counts
+    only, no session copies. Per host: busy_all = folded_busy + errored_busy + unkeyed_busy,
+    the same for idle."""
+    brief_hosts = {h["name"] for h in board["hosts"] if h.get("brief")}
+    blocked = set()  # (host, id) keys carried by a session that may not fold
+    for kind in _SESSION_LISTS:
+        for s in board.get(kind) or ():
+            if not s.get("id"):
+                continue
+            if (kind not in ("busy", "idle") or s.get("host") not in brief_hosts
+                    or session_error(s)):
+                blocked.add((s.get("host"), s["id"]))
+    hosts, keys = [], []
+    for h in board["hosts"]:
+        if not h.get("brief"):
+            continue
+        e = {"host": h["name"], "folded_busy": 0, "folded_idle": 0, "errored_busy": 0,
+             "errored_idle": 0, "unkeyed_busy": 0, "unkeyed_idle": 0, "busy_all": 0,
+             "idle_all": 0, "warned": 0, "git_failed_projects": 0}
+        git_projects = set()
+        for kind in ("busy", "idle"):
+            for s in board[kind]:
+                if s.get("host") != h["name"]:
+                    continue
+                e[kind + "_all"] += 1
+                if session_error(s):
+                    e["errored_" + kind] += 1
+                elif not s.get("id") or (h["name"], s["id"]) in blocked:
+                    e["unkeyed_" + kind] += 1  # no key of its own: list it rather than hide it
+                else:
+                    e["folded_" + kind] += 1
+                    if [h["name"], s["id"]] not in keys:
+                        keys.append([h["name"], s["id"]])
+                    e["warned"] += 1 if s.get("errors") else 0
+                    if s.get("git_failed"):
+                        git_projects.add((h["name"], s.get("project")))
+        e["git_failed_projects"] = len(git_projects)
+        hosts.append(e)
+    return {"hosts": hosts, "keys": keys}
+
+
+def folded(board, s):
+    """The one verdict for "this session is shown inside its host's summary line": cards,
+    terminal rows, the preview and the swim lanes all ask here. Reads board["brief"]["keys"]
+    only; False for a board without "brief" and for a session without an id."""
+    brief = board.get("brief")
+    if not brief or not s.get("id"):
+        return False
+    return [s.get("host"), s.get("id")] in brief["keys"]
+
+
+def brief_note(board, kind):
+    """Header note after the busy / idle count, e.g. "（<host> 5 · <host> 2）": how many of
+    that count each brief host holds (folded or not). "" when no brief host holds any."""
+    parts = ["%s %d" % (e["host"], e[kind + "_all"])
+             for e in (board.get("brief") or {}).get("hosts") or () if e[kind + "_all"]]
+    return "（%s）" % " · ".join(parts) if parts else ""
+
+
+def _counted(pairs, sep):
+    return sep.join("%s %d" % (word, n) for word, n in pairs if n)
+
+
+def brief_shown(board, host):
+    """Whether the brief host gets its summary (the terminal's summary line, the web's fold
+    block): only when a busy/idle session of it is folded, by folded() alone. A stale host's
+    sessions are not in busy/idle, so it gets none. Web and terminal both ask here."""
+    return any(s.get("host") == host and folded(board, s)
+               for kind in ("busy", "idle") for s in board.get(kind) or ())
+
+
+def brief_label(entry):
+    """Summary line text of a brief_fold host entry; web and terminal show the same words.
+    Items that are 0 are left out."""
+    shown = _counted((("进行中", entry["folded_busy"]), ("空闲", entry["folded_idle"])), " · ")
+    out = entry["host"] + (" · " + shown if shown else "")
+    apart = _counted((("进行中", entry["errored_busy"] + entry["unkeyed_busy"]),
+                      ("空闲", entry["errored_idle"] + entry["unkeyed_idle"])), " · ")
+    if apart:
+        why = _counted((("出错", entry["errored_busy"] + entry["errored_idle"]),
+                        ("无会话 id", entry["unkeyed_busy"] + entry["unkeyed_idle"])), "，")
+        out += "（另有单独列出的 %s：%s）" % (apart, why)
+    if entry["warned"]:
+        out += " · 告警 %d" % entry["warned"]
+    if entry["git_failed_projects"]:
+        out += " · git 读取失败 %d 个项目" % entry["git_failed_projects"]
+    return out
+
+
+def brief_age(host_entry, now):
+    """{"at", "age"} when the host's live data is not fresh (aging, or stale), else None.
+    Judged by host_freshness only; at = now - age on our own clock, not the remote live_at."""
+    f = host_freshness(host_entry, now)
+    if f["level"] in ("aging", "stale"):
+        return {"at": now - f["age"], "age": f["age"]}
+    return None
+
+
+def brief_host_age(board, host, now):
+    """brief_age of the brief host named host, its entry looked up in board["hosts"]; web,
+    terminal line and preview all ask here. A host the board does not list raises
+    LookupError: a made-up entry has no live time and would read as fresh."""
+    for h in board.get("hosts") or ():
+        if h.get("name") == host:
+            return brief_age(h, now)
+    raise LookupError("brief host %r is not in board hosts" % host)
 
 
 TOP_TODO_MAX = 5
@@ -442,12 +570,17 @@ def build_lanes(board, commits_by_project, failed_git, now):
     ordered += [(s, "ended") for s in board["ended_today"]]
     ordered += [(s, "unknown") for s in board.get("unknown") or () if s["end"] >= day]
     start, end = _lane_window([s for s, _ in ordered], day, now)
-    rows, commit_shown = [], set()
+    # a folded session's lane goes to its host's brief block; each part marks a project's
+    # commits once, so a project split across both shows them on both
+    rows, brief_rows, commit_shown = [], {}, {}
     for s, state in ordered:
+        part = s.get("host") if folded(board, s) else None
+        out = rows if part is None else brief_rows.setdefault(part, [])
+        shown = commit_shown.setdefault(part, set())
         key = (s.get("host"), s.get("project"))
         commits = []
-        if key not in commit_shown:
-            commit_shown.add(key)
+        if key not in shown:
+            shown.add(key)
             commits = sorted(t for t in commits_by_project.get(key, ()) if start <= t <= end)
         tasks = s.get("tasks")
         owns = isinstance(tasks, dict) and not s.get("tasks_owner")
@@ -456,12 +589,16 @@ def build_lanes(board, commits_by_project, failed_git, now):
         segs = [[k, max(a, start), min(b, end)] for k, a, b in s.get("segments") or ()
                 if min(b, end) > max(a, start)]
         total = clip_total(segs, start, end)
-        rows.append({"host": s.get("host"), "project": s.get("project"), "session_id": s.get("id"),
-                     "state": state, "segments": segs, "commits": commits, "merges": merges,
-                     "git_failed": key in failed_git,
-                     "busy_s": total["busy"], "wait_s": total["wait"]})
+        out.append({"host": s.get("host"), "project": s.get("project"), "session_id": s.get("id"),
+                    "state": state, "segments": segs, "commits": commits, "merges": merges,
+                    "git_failed": key in failed_git,
+                    "busy_s": total["busy"], "wait_s": total["wait"]})
+    brief = [{"host": e["host"], "rows": brief_rows[e["host"]][:LANE_MAX_ROWS],
+              "n": len(brief_rows[e["host"]]),
+              "more": max(0, len(brief_rows[e["host"]]) - LANE_MAX_ROWS)}
+             for e in (board.get("brief") or {}).get("hosts") or () if brief_rows.get(e["host"])]
     return {"start": start, "end": end, "rows": rows[:LANE_MAX_ROWS],
-            "more": max(0, len(rows) - LANE_MAX_ROWS)}
+            "more": max(0, len(rows) - LANE_MAX_ROWS), "brief": brief}
 
 
 def statusline_doc(board, now):
